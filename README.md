@@ -1,81 +1,218 @@
-# Spatio-Temporal Heterogeneous Graph Attention Network (ST-HGAT) for Chess
+# ChessGNN — Searchless Chess Engine via Spatio-Temporal Heterogeneous GNN
 
-## 1. Abstract
-This repository implements a **Value-Based Chess Tutor** using a Spatio-Temporal Heterogeneous Graph Attention Network (ST-HGAT). Instead of predicting moves directly (Policy Network), this model learns a **Value Function** $V(s)$ that estimates the winning probability of board states. 
+A graph neural network that encodes chess positions as typed relational graphs and ranks legal moves by win probability **in a single forward pass** — no search tree required.
 
-By utilizing a "Spatio-Temporal" architecture, it processes the **full sequence of a game** to understand temporal dynamics. The system recommends moves by simulating all legal future states and ranking them by their predicted value, leveraging historical context to identify traps and long-term advantages.
+Traditional engines like Stockfish rely on explicit alpha-beta search over millions of positions. AlphaZero-style CNNs treat the board as a flat 8×8 grid and still need MCTS at inference. ChessGNN asks a different question: can a GNN with rich relational inductive bias — attack edges, defense edges, ray edges, move edges — learn enough tactical and strategic knowledge to rank moves correctly without any rollout?
 
-## 2. The Logic: "Evaluate & Rank"
-Comparing to traditional engines or policy networks:
+The answer so far: yes, with distillation from Stockfish and the architecture described below.
 
-1.  **Context-Aware History**: Unlike standard evaluators, the Tutor maintains a "Game Memory" (GRU latent state).
-2.  **Simulation**: For any position, it generates all legal moves and creates resulting board states.
-3.  **Stateful Evaluation**: Each resulting state is fed into the ST-HGAT as a "branch" off the current game history.
-4.  **Ranking**: The model predicts "Win Probability" for all possibilities. The Tutor recommends moves that statistically correlate with winning.
+---
 
-## 3. Architecture
+## How It Works
 
-### 3.1 3-Layer Weighted ST-HGAT
-We stack **3 Layers** of Weighted Heterogeneous Graph Convolutions to perform spatial reasoning.
-*   **Layer 1**: Direct physical attacks/defenses.
-*   **Layer 2**: Secondary support and control.
-*   **Layer 3**: Complex tactical chains (pins, batteries, discovered attacks).
+### 1. Position as a Graph
 
-### 3.2 Sequence-to-Sequence Temporal Processing
-The model uses a **Gated Recurrent Unit (GRU)** to process the game flow.
-*   **Parallel Spatial Encoding**: The entire game sequence is batched into a single "Super-Graph" and processed by the Gating layers in one parallel pass (O(1) relative to game length during training).
-*   **Infinite Horizon**: We process the **entire game** sequence at once. There are no arbitrary sliding windows; the model sees everything from the opening to the current move.
-*   **Stateful Inference**: During live play, the Tutor uses a "KV-Cache" style incremental update, only processing the *latest* move to update its memory, making inference extremely fast.
+Every chess position is converted to a `HeteroData` graph by `ChessGraphBuilder.fen_to_graph()`:
 
-## 4. Training Methodology: Outcome Regression
+| Node type | Count | Features |
+|-----------|-------|----------|
+| `piece` | ≤ 32 | type (one-hot 6), color, value, file, rank |
+| `square` | 64 | file/7, rank/7, is_occupied |
+| `global` | 1 | material balance, side to move, castling rights, game phase |
 
-We train using **Mean Squared Error (MSE)** directly on the game result across the entire sequence.
+| Edge type | Semantics |
+|-----------|-----------|
+| `(piece, on, square)` / `(square, occupied_by, piece)` | piece location |
+| `(piece, interacts, piece)` | attack / defend with piece-value weights |
+| `(piece, ray, piece)` | long-range diagonal / file / rank influence |
+| `(square, adjacent, square)` | Chebyshev-1 king-move adjacency |
+| `(piece, move, square)` | one edge per legal move (used by Q-head) |
 
-$$ \text{Loss} = \frac{1}{T} \sum_{t=1}^{T} \text{MSE}(\text{Predicted\_Value}_t, \text{Final\_Result}) $$
+### 2. Spatial Reasoning — Weighted ST-HGAT
 
-*   **Supervised by Outcome**: Every move in a winning game is supervised as "Winning" (to varying degrees), forcing the model to learn the patterns that lead to victory.
-*   **Efficiency**: By batching the full game sequence, training throughput is increased by **~10x** compared to sliding-window approaches.
+Three stacked `WeightedHGTConv` layers process the graph. Each layer uses separate key/query/value projections per node type and separate relation matrices per edge type. Edge weights fold into attention multiplicatively:
 
-## 5. Usage
+$$\alpha = \mathrm{softmax}\!\left(\frac{(h_i W_K)(h_j W_Q)^\top}{\sqrt{d}}\right) \cdot (1 + w_{ij})$$
 
-### Training
-Run the training script to process PGN datasets.
+A `RayAlignmentBlock` follows the convolutions to amplify long-range piece influence along rays before pooling.
+
+Layer 1 captures direct attacks and defenses. Layer 2 captures secondary support chains. Layer 3 captures complex tactics — pins, batteries, discovered attacks.
+
+### 3. Temporal Context — GRU over Game History
+
+After spatial pooling, a GRU accumulates game history:
+
+$$h_t = \mathrm{GRU}([\mathrm{pool}_\mathrm{piece} \| \mathrm{pool}_\mathrm{square}],\; h_{t-1})$$
+
+- **Batch mode** (`forward()`): processes the entire game sequence at once for training.
+- **Incremental mode** (`forward_step(h_prev)`): O(1) per move for online play — the `CaseTutor` caches `h_t` after each move.
+
+### 4. Output Heads
+
+| Head | Output | Training signal |
+|------|--------|-----------------|
+| **Value** V(s) | [White win, Draw, Black win] logits | Game outcome regression + TD loss |
+| **Q-head** Q(s,a) | scalar per legal-move edge | KL divergence vs. Stockfish move distribution |
+| **Material** (aux) | normalized material imbalance | White − black material / 39 |
+| **Dominance** (aux) | positional dominance scalar | PageRank centrality difference |
+
+### 5. Training Loss
+
+$$\mathcal{L} = \mathcal{L}_\mathrm{outcome} + \lambda_1 \mathcal{L}_\mathrm{TD} + \lambda_2 \mathcal{L}_\mathrm{policy} + \lambda_3 \mathcal{L}_\mathrm{aux}$$
+
+- **Outcome**: MSE of V(s) vs. game result at every step along the mainline.
+- **TD**: forces $V(s_t) \approx V(s_{t+1})$, smoothing the win-probability curve across moves.
+- **Policy**: KL divergence between Q-head distribution and Stockfish top-k move scores (distillation).
+- **Auxiliary**: material and dominance predictions provide dense gradients early in training.
+
+Gradient accumulation (`ACCUMULATION_STEPS = 16`) is used to compensate for batch size 1 (one game per step).
+
+---
+
+## Inference: Move Ranking Without Search
+
+For a given position the `CaseTutor` does:
+
+1. Run a single `forward_step()` with the cached GRU state → node and edge embeddings.
+2. Read Q-scores from each `(piece, move, square)` edge.
+3. Return `argmax` move + win probability + top-k analysis.
+
+No rollout, no MCTS, no alpha-beta. O(1) in the number of legal moves after the GNN pass.
+
+---
+
+## Quick Start
+
+### Prerequisites
+
+```
+Python 3.10+
+PyTorch (CUDA optional)
+PyTorch Geometric
+```
+
+Install all dependencies:
 
 ```bash
-python3 train.py
+pip install -r requirements.txt
 ```
 
-**Performance Metrics**:
-- **Throughput**: ~1 game/second (Standard GPU).
-- **Context**: Fully temporal (full game history).
-- **Accuracy**: Improved by supervising the entire mainline simultaneously.
+The Stockfish binary is included at `stockfish/src/stockfish` (Linux ELF). On Windows, point `STOCKFISH_PATH` in `train.py` to your local executable.
 
-### The Tutor (Inference)
-The `CaseTutor` is stateful for maximum performance.
+### Training
+
+Place a PGN file in `input/` and update the path constant at the top of `train.py`, then:
+
+```bash
+python train.py
+```
+
+The loop streams full game sequences from the PGN, computes the combined loss, and saves checkpoints to `output/st_hgat_model.pt`. A training log is written to `output/training.log`.
+
+Default hyperparameters (edit the `ALL_CAPS` constants in `train.py`):
+
+| Constant | Default | Notes |
+|----------|---------|-------|
+| `HIDDEN_DIM` | 256 | GNN and GRU hidden size |
+| `NUM_LAYERS` | 3 | WeightedHGTConv stack depth |
+| `LR` | 0.005 | Adam learning rate |
+| `ACCUMULATION_STEPS` | 16 | Effective batch size |
+| `EPOCHS` | 2 | Passes over the training PGN |
+| `TRAIN_GAMES` | 100 | Games to sample per epoch |
+
+### Using the Tutor
 
 ```python
+import torch
+from chessgnn.model import STHGATLikeModel
 from tutor import CaseTutor
-# ... load model ...
+
+# Load model
+device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
+model = STHGATLikeModel(hidden_dim=256, num_layers=3)
+model.load_state_dict(torch.load("output/st_hgat_model.pt", map_location=device))
+model.eval()
+
 tutor = CaseTutor(model, device)
 
-# 1. Update the tutor as moves are played
-tutor.update_state(current_fen)
+# Feed moves as they are played (FEN string after each move)
+tutor.update_state(fen_after_move_1)
+tutor.update_state(fen_after_move_2)
 
-# 2. Get recommendations
+# Get the recommended next move
 best_move, win_prob, analysis = tutor.recommend_move(current_fen)
+print(f"Recommended: {best_move}  Win probability: {win_prob:.1%}")
 ```
 
-## 6. Project Structure
+### Running Tests
+
+```bash
+pytest tests/
+```
+
+---
+
+## Project Structure
 
 ```
-├── chessgnn/
-│   ├── graph_builder.py  # FEN -> HeteroData (Nodes, Edges, Weights)
-│   ├── dataset.py        # PGN -> Full Game Sequence Yielding
-│   ├── model.py          # 3-Layer Weighted HGT + Parallel Batching + Stateful Inference
-│   └── ...
-├── train.py              # Main Loop + Full Sequence MSE Loss
-├── tutor.py              # Stateful Inference Logic (O(1) Branching)
-├── output/               # Trained models and logs
-└── input/                # PGN datasets
+chessgnn/
+├── graph_builder.py      # FEN → HeteroData (nodes, edges, weights)
+├── model.py              # STHGATLikeModel, WeightedHGTConv, RayAlignmentBlock
+├── dataset.py            # PGN → full-game sequence yielder
+├── game_processor.py     # Stockfish evaluation pipeline
+├── position_to_graph.py  # Auxiliary ground-truth computation
+└── visualizer.py         # Win-probability video generation
+
+agent/
+├── core.py               # LLM coaching agent
+├── llm.py                # LLM provider abstraction (Groq)
+├── schema.py             # Pydantic schemas
+└── tools.py              # Agent tools (move explanation, etc.)
+
+train.py                  # Training entry point
+tutor.py                  # CaseTutor — stateful inference
+
+tests/
+├── test_graph_builder.py
+├── test_inference.py
+├── test_model.py
+├── test_ray_alignment.py
+└── test_temporal_ablation.py
+
+input/                    # PGN datasets
+output/                   # Checkpoints, logs, videos
+stockfish/src/stockfish   # Bundled Stockfish binary (Linux)
 ```
+
+---
+
+## Roadmap
+
+| # | Task | Status |
+|---|------|--------|
+| Graph builder: global node, move edges, ablation flags | TASK001 | ✅ Done |
+| Edge-aware GATEAU-style layer + Q-head | TASK002 | ✅ Done |
+| Temporal ablation experiments | TASK003 | ✅ Done |
+| Engine distillation dataset pipeline | TASK004 | Pending |
+| Multi-task distillation training | TASK005 | Pending |
+| Evaluation harness (puzzles, Elo gauntlet) | TASK006 | Pending |
+| UCI wrapper for engine play | TASK007 | Pending |
+| Calibration (temperature scaling + reliability diagrams) | TASK008 | Pending |
+| Scaling experiments | TASK009 | Pending |
+
+**Success targets**: ≥ 40% top-1 move agreement with Stockfish on tactical puzzles (searchless), provisional Elo ≥ 1600 vs. reduced-strength Stockfish, calibrated win probabilities (reliability diagram R² > 0.95).
+
+---
+
+## Known Limitations
+
+- `train.py` hardcodes Linux paths — adjust `INPUT_PGN` and `STOCKFISH_PATH` for other platforms.
+- Stockfish binary is a Linux ELF; Windows users need a native `.exe` or WSL.
+- Positions with zero pieces (extreme edge cases) may break `Batch` construction in `forward()`.
+
+---
+
+## License
+
+See individual file headers. Stockfish is bundled under the GPL v3 (see `stockfish/Copying.txt`).
 
