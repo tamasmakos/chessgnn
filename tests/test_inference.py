@@ -100,7 +100,7 @@ class TestStatefulInference(unittest.TestCase):
         h_prev = tutor.current_hidden.clone()
         
         # Recommend should NOT change state (rollout reads current_hidden but never writes it)
-        best_move, best_prob, ranking = tutor.recommend_move(fen)
+        best_move, best_prob, ranking, uncertainty = tutor.recommend_move(fen)
         self.assertIsNotNone(best_move)
         self.assertTrue(torch.equal(tutor.current_hidden, h_prev))
         

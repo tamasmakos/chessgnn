@@ -2,6 +2,8 @@ import math
 import torch
 import chess
 from chessgnn.graph_builder import ChessGraphBuilder
+from chessgnn.calibration import TemperatureScaler
+
 
 class CaseTutor:
 
@@ -11,9 +13,17 @@ class CaseTutor:
         self.model.to(device)
         self.model.eval()
         self._use_q_head = hasattr(model, 'forward_with_q')
-        self.builder = ChessGraphBuilder(use_move_edges=self._use_q_head)
+        self.builder = ChessGraphBuilder(
+            use_move_edges=self._use_q_head,
+            use_global_node=self._use_q_head,
+        )
         self.current_hidden = None
-        
+        self._scaler: TemperatureScaler | None = None
+
+    def set_calibration(self, scaler: TemperatureScaler | None) -> None:
+        """Attach or detach a TemperatureScaler for win-probability calibration."""
+        self._scaler = scaler
+
     def reset(self):
         """Resets the internal hidden state (New Game)."""
         self.current_hidden = None
@@ -41,15 +51,19 @@ class CaseTutor:
         -------
         best_move : chess.Move or None
         best_prob : float
-            Win probability for the side to move (0–100 %).
+            Win probability for the side to move (0–100 %).  Calibrated if a
+            TemperatureScaler has been attached via ``set_calibration``.
         ranking : list of (chess.Move, float)
             All legal moves sorted best-first.
+        uncertainty : float
+            Normalised entropy of the Q-score distribution (0 = certain, 1 =
+            uniform).  Always 0.0 on the rollout path.
         """
         board = chess.Board(fen)
         legal_moves = list(board.legal_moves)
 
         if not legal_moves:
-            return None, 0.0, []
+            return None, 0.0, [], 0.0
 
         if self._use_q_head:
             return self._recommend_q(board, legal_moves, fen)
@@ -70,6 +84,13 @@ class CaseTutor:
             # Safety fallback (should not normally occur)
             return self._recommend_rollout(board, legal_moves)
 
+        # Normalised entropy: H / log(M), range [0, 1]
+        m = len(q_list)
+        probs = torch.softmax(q_scores, dim=0)
+        log_m = math.log(m) if m > 1 else 1.0
+        entropy = float(-torch.sum(probs * torch.log(probs.clamp(min=1e-9))).item())
+        uncertainty = float(entropy / log_m)
+
         is_white_turn = board.turn == chess.WHITE
         move_scores = [
             (move, (math.tanh(q) + 1) / 2 * 100)
@@ -84,7 +105,10 @@ class CaseTutor:
             best_move = move_scores[0][0]
             best_prob = 100.0 - move_scores[0][1]
 
-        return best_move, best_prob, move_scores
+        if self._scaler is not None:
+            best_prob = self._scaler.calibrate(best_prob / 100.0) * 100.0
+
+        return best_move, best_prob, move_scores, uncertainty
 
     @staticmethod
     def _extract_scalar(step_output) -> float:
@@ -131,4 +155,7 @@ class CaseTutor:
             best_move = move_scores[0][0]
             best_prob = 100.0 - move_scores[0][1]
 
-        return best_move, best_prob, move_scores
+        if self._scaler is not None:
+            best_prob = self._scaler.calibrate(best_prob / 100.0) * 100.0
+
+        return best_move, best_prob, move_scores, 0.0
