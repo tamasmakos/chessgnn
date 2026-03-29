@@ -15,23 +15,42 @@ PIECE_VALUES = {
 }
 
 class ChessGraphBuilder:
-    def __init__(self):
+    def __init__(self, use_global_node: bool = False, use_move_edges: bool = False):
         self.node_type_map = {'piece': 0, 'square': 1}
+        self.use_global_node = use_global_node
+        self.use_move_edges = use_move_edges
         
     def fen_to_graph(self, fen: str, history_emb: Optional[torch.Tensor] = None) -> HeteroData:
         """
         Converts a FEN string into a HeteroData object.
-        Nodes:
-            - pieces: [type, color, value, pos_emb]
-            - squares: [coord, occupancy]
-        Edges:
-            - interacts (piece-piece): [weight, type] (Attack/Defense)
-            - on (piece-square): [1] (Location)
-            - adjacent (square-square): [1] (Grid)
-            - ray (piece-piece): [distance, blocking_count]
+
+        Nodes (always present):
+            - piece:  [type_onehot(6), color, value, file, rank]  (10-dim)
+            - square: [file/7, rank/7, is_occupied]               (3-dim)
+        Nodes (optional):
+            - global: [side_to_move, castle_kside_w, castle_qside_w, castle_kside_b,
+                       castle_qside_b, halfmove_clock/100, material_w/39, material_b/39,
+                       game_phase]                                 (9-dim, if use_global_node)
+
+        Edges (always present):
+            - (piece, on, square):              location
+            - (square, occupied_by, piece):     reverse location
+            - (square, adjacent, square):       Chebyshev-1 grid adjacency
+            - (piece, interacts, piece):        attack/defense, attr=[weight, type]
+            - (piece, ray, piece):              long-range alignment, attr=[dist/7, blocking]
+        Edges (optional):
+            - (global, global_to_piece, piece):  if use_global_node
+            - (piece, piece_to_global, global):  if use_global_node
+            - (global, global_to_square, square): if use_global_node
+            - (square, square_to_global, global): if use_global_node
+            - (piece, move, square):             legal moves,
+                                                 attr=[is_capture, captured_val/9,
+                                                       is_promotion, is_castling, distance/7]
+                                                 if use_move_edges
         """
         board = chess.Board(fen)
         data = HeteroData()
+        data.fen = fen
 
         # 1. Nodes Construction
         pieces = []
@@ -184,7 +203,126 @@ class ChessGraphBuilder:
             data['piece', 'ray', 'piece'].edge_index = torch.empty((2, 0), dtype=torch.long)
             data['piece', 'ray', 'piece'].edge_attr = torch.empty((0, 2), dtype=torch.float)
 
+        # --- Optional: Global Node ---
+        if self.use_global_node:
+            side_to_move = 1.0 if board.turn == chess.WHITE else -1.0
+            castle_kside_w = 1.0 if board.has_kingside_castling_rights(chess.WHITE) else 0.0
+            castle_qside_w = 1.0 if board.has_queenside_castling_rights(chess.WHITE) else 0.0
+            castle_kside_b = 1.0 if board.has_kingside_castling_rights(chess.BLACK) else 0.0
+            castle_qside_b = 1.0 if board.has_queenside_castling_rights(chess.BLACK) else 0.0
+            halfmove = min(board.halfmove_clock / 100.0, 1.0)
+
+            material_white = sum(
+                PIECE_VALUES[board.piece_at(sq).piece_type]
+                for sq in SQUARES if board.piece_at(sq) and board.piece_at(sq).color == chess.WHITE
+            ) / 39.0
+            material_black = sum(
+                PIECE_VALUES[board.piece_at(sq).piece_type]
+                for sq in SQUARES if board.piece_at(sq) and board.piece_at(sq).color == chess.BLACK
+            ) / 39.0
+
+            non_pawn_material = sum(
+                PIECE_VALUES[board.piece_at(sq).piece_type]
+                for sq in SQUARES
+                if board.piece_at(sq) and board.piece_at(sq).piece_type not in (chess.PAWN, chess.KING)
+            )
+            game_phase = min(non_pawn_material / 62.0, 1.0)
+
+            global_feat = [
+                side_to_move, castle_kside_w, castle_qside_w,
+                castle_kside_b, castle_qside_b, halfmove,
+                material_white, material_black, game_phase,
+            ]
+            data['global'].x = torch.tensor([global_feat], dtype=torch.float)  # [1, 9]
+
+            # global -> piece  and  piece -> global
+            num_pieces = len(piece_indices)
+            if num_pieces > 0:
+                g2p_src = [0] * num_pieces
+                g2p_dst = list(range(num_pieces))
+                data['global', 'global_to_piece', 'piece'].edge_index = torch.tensor(
+                    [g2p_src, g2p_dst], dtype=torch.long)
+                data['piece', 'piece_to_global', 'global'].edge_index = torch.tensor(
+                    [g2p_dst, g2p_src], dtype=torch.long)
+            else:
+                data['global', 'global_to_piece', 'piece'].edge_index = torch.empty((2, 0), dtype=torch.long)
+                data['piece', 'piece_to_global', 'global'].edge_index = torch.empty((2, 0), dtype=torch.long)
+
+            # global -> square  and  square -> global
+            num_squares = len(SQUARES)
+            g2s_src = [0] * num_squares
+            g2s_dst = list(range(num_squares))
+            data['global', 'global_to_square', 'square'].edge_index = torch.tensor(
+                [g2s_src, g2s_dst], dtype=torch.long)
+            data['square', 'square_to_global', 'global'].edge_index = torch.tensor(
+                [g2s_dst, g2s_src], dtype=torch.long)
+
+        # --- Optional: Move Edges ---
+        if self.use_move_edges:
+            # Edge type: ('piece', 'move', 'square')
+            # One directed edge per legal move: source piece -> destination square
+            # Features: [is_capture, captured_value/9, is_promotion, is_castling, distance/7]
+            move_src: list[int] = []
+            move_dst: list[int] = []
+            move_attr: list[list[float]] = []
+
+            for move in board.legal_moves:
+                from_sq = move.from_square
+                to_sq = move.to_square
+                if from_sq not in piece_indices:
+                    continue
+
+                p_src_idx = piece_indices[from_sq]
+                sq_dst_idx = square_indices[to_sq]
+
+                is_capture = 1.0 if board.is_capture(move) else 0.0
+                if board.is_en_passant(move):
+                    captured_val = PIECE_VALUES[chess.PAWN] / 9.0
+                elif board.is_capture(move):
+                    captured_piece = board.piece_at(to_sq)
+                    captured_val = PIECE_VALUES[captured_piece.piece_type] / 9.0 if captured_piece else 0.0
+                else:
+                    captured_val = 0.0
+
+                is_promotion = 1.0 if move.promotion is not None else 0.0
+                is_castling = 1.0 if board.is_castling(move) else 0.0
+                distance = chess.square_distance(from_sq, to_sq) / 7.0
+
+                move_src.append(p_src_idx)
+                move_dst.append(sq_dst_idx)
+                move_attr.append([is_capture, captured_val, is_promotion, is_castling, distance])
+
+            if move_src:
+                data['piece', 'move', 'square'].edge_index = torch.tensor(
+                    [move_src, move_dst], dtype=torch.long)
+                data['piece', 'move', 'square'].edge_attr = torch.tensor(move_attr, dtype=torch.float)
+            else:
+                data['piece', 'move', 'square'].edge_index = torch.empty((2, 0), dtype=torch.long)
+                data['piece', 'move', 'square'].edge_attr = torch.empty((0, 5), dtype=torch.float)
+
         return data
+
+    def get_metadata(self) -> tuple:
+        """Returns the (node_types, edge_types) metadata tuple for the current flag configuration."""
+        node_types = ['piece', 'square']
+        edge_types = [
+            ('piece', 'on', 'square'),
+            ('square', 'occupied_by', 'piece'),
+            ('square', 'adjacent', 'square'),
+            ('piece', 'interacts', 'piece'),
+            ('piece', 'ray', 'piece'),
+        ]
+        if self.use_global_node:
+            node_types.append('global')
+            edge_types.extend([
+                ('global', 'global_to_piece', 'piece'),
+                ('piece', 'piece_to_global', 'global'),
+                ('global', 'global_to_square', 'square'),
+                ('square', 'square_to_global', 'global'),
+            ])
+        if self.use_move_edges:
+            edge_types.append(('piece', 'move', 'square'))
+        return node_types, edge_types
 
     def sigmoid(self, x):
         return 1 / (1 + np.exp(-x))

@@ -86,6 +86,22 @@ class CaseTutor:
 
         return best_move, best_prob, move_scores
 
+    @staticmethod
+    def _extract_scalar(step_output) -> float:
+        """
+        Extract a [-1, 1] scalar from a forward_step return value.
+
+        GATEAUChessModel returns a Tensor [1, 1].
+        STHGATLikeModel returns (win_logits [3], mat [1], dom [1]); convert
+        to a scalar via softmax(white) - softmax(black).
+        """
+        if isinstance(step_output, torch.Tensor):
+            return step_output.item()
+        # Legacy tuple: (win_logits [3], mat, dom)
+        win_logits = step_output[0]
+        probs = torch.softmax(win_logits, dim=0)
+        return (probs[0] - probs[2]).item()
+
     def _recommend_rollout(self, board: chess.Board, legal_moves: list):
         """Per-successor rollout using forward_step (legacy path)."""
         move_scores = []
@@ -99,8 +115,8 @@ class CaseTutor:
             graph = graph.to(self.device)
 
             with torch.no_grad():
-                raw_score, _ = self.model.forward_step(graph, self.current_hidden)
-                raw_score = raw_score.item()
+                step_out, _ = self.model.forward_step(graph, self.current_hidden)
+                raw_score = self._extract_scalar(step_out)
 
             white_win_prob = (raw_score + 1) / 2 * 100
             move_scores.append((move, white_win_prob))

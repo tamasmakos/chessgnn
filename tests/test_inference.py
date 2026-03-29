@@ -55,21 +55,26 @@ class TestStatefulInference(unittest.TestCase):
         print(f"Sequence length: {len(sequence_graphs)}")
         
         # 2. Run Full Sequence Forward
+        # STHGATLikeModel.forward() returns (win_logits [1,T,3], mat, dom)
         with torch.no_grad():
-            full_out_seq = self.model(sequence_graphs) # [1, T, 1]
-            last_val_full = full_out_seq[0, -1, 0].item()
+            win_logits_full, _, _ = self.model(sequence_graphs)
+            # Use the White-win logit as the comparison scalar
+            full_vals = torch.softmax(win_logits_full[0], dim=-1)[:, 0]  # [T]
+            last_val_full = full_vals[-1].item()
             
         # 3. Run Iterative Forward Step
+        # STHGATLikeModel.forward_step() returns ((win_logits [3], mat, dom), h_new)
         h_curr = None
         last_val_step = 0.0
         
         with torch.no_grad():
             for i, graph in enumerate(sequence_graphs):
-                val, h_curr = self.model.forward_step(graph, h_curr)
-                last_val_step = val.item()
+                (step_logits, _, _), h_curr = self.model.forward_step(graph, h_curr)
+                step_probs = torch.softmax(step_logits, dim=0)
+                last_val_step = step_probs[0].item()
                 
                 # Verify intermediate steps
-                full_step_val = full_out_seq[0, i, 0].item()
+                full_step_val = full_vals[i].item()
                 diff = abs(last_val_step - full_step_val)
                 print(f"Step {i}: Full={full_step_val:.5f}, Step={last_val_step:.5f}, Diff={diff:.5f}")
                 self.assertTrue(diff < 1e-5, f"Mismatch at step {i}")
@@ -94,8 +99,9 @@ class TestStatefulInference(unittest.TestCase):
         
         h_prev = tutor.current_hidden.clone()
         
-        # Recommend should NOT change state
-        tutor.recommend_move(fen)
+        # Recommend should NOT change state (rollout reads current_hidden but never writes it)
+        best_move, best_prob, ranking = tutor.recommend_move(fen)
+        self.assertIsNotNone(best_move)
         self.assertTrue(torch.equal(tutor.current_hidden, h_prev))
         
         print("Tutor State Test Passed!")
