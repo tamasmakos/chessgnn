@@ -18,6 +18,7 @@ LR = 0.005
 EPOCHS = 2
 TRAIN_GAMES = 100
 TEST_GAMES = 5
+ACCUMULATION_STEPS = 16 # Effective Batch Size = 16 games
 
 # Setup Logging
 import logging
@@ -37,6 +38,7 @@ logger = logging.getLogger(__name__)
 from chessgnn.game_processor import ChessGameProcessor
 from chessgnn.visualizer import ChessVisualizer, GameVideoGenerator
 from chessgnn.graph_builder import ChessGraphBuilder
+from chessgnn.position_to_graph import analyze_position
 
 def visualize_test_games(model, pgn_file, num_games, offset, device, epoch):
     """
@@ -85,12 +87,20 @@ def visualize_test_games(model, pgn_file, num_games, offset, device, epoch):
                 seq_window = history_graphs[-16:]
                 
                 with torch.no_grad():
-                    # model(seq) -> [1, T, 1]
-                    # We only care about the last step
-                    scores = model(seq_window)
-                    last_score = scores[0, -1, 0].item()
+                    # model(seq) -> win_logits, mat, dom
+                    win_logits, _, _ = model(seq_window)
                     
-                prob = (last_score + 1) / 2 * 100
+                    # Logits [1, T, 3] -> Last step [3]
+                    last_logits = win_logits[0, -1]
+                    probs = torch.softmax(last_logits, dim=0) # [White, Draw, Black]
+                    
+                    p_white = probs[0].item() # 0..1
+                    p_black = probs[2].item()
+                    
+                    # Convert to -1..1 score for compatibility
+                    last_score = p_white - p_black
+                    
+                prob = p_white * 100 # Direct Win% for White
                 win_probs.append(prob)
                 
             # Generate Video
@@ -149,10 +159,12 @@ def train():
         pbar = tqdm(train_loader, desc=f"Epoch {epoch+1}/{EPOCHS}")
         epoch_steps = 0
         
-        for batch_list in pbar:
-            # batch_list: List[Dict]
+        optimizer.zero_grad() # Initialize outside the loop for accumulation
+        
+        for i, batch_list in enumerate(pbar):
+            # batch_list: List[Dict] (Batch Size = 1)
             
-            optimizer.zero_grad()
+            # optimizer.zero_grad() -> REMOVED
             batch_loss = 0.0
             total_target_val = 0.0
             count = 0
@@ -160,6 +172,7 @@ def train():
             last_sample = None
             
             # Gradient Accumulation Implementation
+            # Since BATCH_SIZE=1, this loop runs once.
             for sample_dict in batch_list:
                 
                 sequence = sample_dict['sequence'] 
@@ -170,19 +183,86 @@ def train():
                 target_val = sample_dict['target_value'] 
                 
                 # Model Forward
-                # Output: [1, T, 1] (Batch=1)
-                score_seq = model(sequence) 
+                # Output: win_logits [1, T, 3], mat [1, T, 1], dom [1, T, 1]
+                win_logits, mat_pred, dom_pred = model(sequence) 
                 
-                # Target Construction
-                # We want to supervise EVERY step with the final game result.
-                # Target: [1, T, 1]
-                T = score_seq.shape[1]
-                target = torch.full((1, T, 1), target_val, device=device).float()
+                # --- 1. Calculate Auxiliary Ground Truths (On Fly) ---
+                target_material = []
+                target_dominance = []
                 
-                loss = mse_criterion(score_seq, target)
+                for graph_step in sequence:
+                    # graph_step.fen added in graph_builder.py
+                    analysis = analyze_position(graph_step.fen)
+                    
+                    # Calc Material
+                    w_mat = sum(p.value for p in analysis.pieces if p.is_white)
+                    b_mat = sum(p.value for p in analysis.pieces if not p.is_white)
+                    # Normalize: Max material diff ~39 (All vs King). 
+                    val = (w_mat - b_mat) / 10.0
+                    target_material.append(val)
+                    
+                    # Calc Dominance (PageRank Difference)
+                    pr = analysis.centralities['pagerank_centrality']
+                    # Some PR might be missing if graph disconnected or empty? Should be fine.
+                    w_dom = sum(pr.get(p.square, 0) for p in analysis.pieces if p.is_white)
+                    b_dom = sum(pr.get(p.square, 0) for p in analysis.pieces if not p.is_white)
+                    # Scale up PR (small values)
+                    target_dominance.append((w_dom - b_dom) * 10.0)
+
+                # Convert to tensors
+                target_material = torch.tensor(target_material, device=device).view(1, -1, 1)
+                target_dominance = torch.tensor(target_dominance, device=device).view(1, -1, 1)
                 
-                # Normalize by batch size (usually 1 here)
-                loss_scaled = loss / len(batch_list)
+                # --- 2. Calculate Losses ---
+                
+                # A. Final Game Result Loss (Supervising ONLY the last step? Or all steps?)
+                # User Plan: "Every move in a winning game is supervised..." -> "Final_Result"
+                # But also: "Only the LAST step is supervised by the actual game result" in the plan code snippet.
+                # "B. Final Game Result Loss (Anchoring) ... final_loss = CE(..., final_result_idx)"
+                # Let's follow the snippet: Only last step anchors to result.
+                
+                # Map expected target_val (1, 0, -1) to index (0, 1, 2)
+                if target_val > 0.5: res_idx = 0   # White Win
+                elif target_val < -0.5: res_idx = 2 # Black Win
+                else: res_idx = 1 # Draw
+                
+                # Last step prediction
+                final_logits = win_logits[:, -1, :] # [1, 3]
+                target_idx = torch.tensor([res_idx], device=device)
+                
+                loss_final = nn.CrossEntropyLoss()(final_logits, target_idx)
+                
+                # B. TD-Learning (Self-Consistency)
+                # "p_white[t] should predict p_white[t+1]"
+                probs = torch.softmax(win_logits, dim=-1) # [1, T, 3]
+                p_white = probs[:, :, 0:1] # [1, T, 1]
+                
+                # We need at least 2 steps for TD
+                if p_white.shape[1] > 1:
+                    # Targets are the NEXT step's prediction (Bootstrap)
+                    td_target = p_white[:, 1:, :].detach() # [1, T-1, 1]
+                    td_pred = p_white[:, :-1, :] # [1, T-1, 1]
+                    loss_td = nn.MSELoss()(td_pred, td_target)
+                else:
+                    loss_td = torch.tensor(0.0, device=device)
+                    
+                # C. Auxiliary Losses
+                # Supervise every step? Yes.
+                loss_aux_mat = nn.MSELoss()(mat_pred, target_material)
+                loss_aux_dom = nn.MSELoss()(dom_pred, target_dominance)
+                
+                # D. Total Loss
+                # Weights: Adjusted by Researcher Plan
+                # Final=5.0 (Stronger Anchor), TD=0.5 (Weaker Constraint), Aux=0.5 each
+                w_final = 5.0
+                w_td = 0.5
+                w_aux = 0.5
+                
+                loss = (w_final * loss_final) + (w_td * loss_td) + (w_aux * loss_aux_mat) + (w_aux * loss_aux_dom)
+                
+                # Normalize by batch size (1) AND Accumulation Steps
+                # loss_scaled = loss / (len(batch_list) * ACCUMULATION_STEPS)
+                loss_scaled = loss / ACCUMULATION_STEPS
                 loss_scaled.backward()
                 
                 if not math.isnan(loss.item()):
@@ -192,9 +272,11 @@ def train():
                 total_target_val += target_val
                 last_sample = sample_dict
             
-            torch.nn.utils.clip_grad_norm_(model.parameters(), max_norm=1.0)
-            
-            optimizer.step()
+            # Step Optimization every N games
+            if (i + 1) % ACCUMULATION_STEPS == 0:
+                torch.nn.utils.clip_grad_norm_(model.parameters(), max_norm=1.0)
+                optimizer.step()
+                optimizer.zero_grad()
             
             avg_loss = batch_loss / count if count > 0 else 0
             
@@ -202,14 +284,19 @@ def train():
             total_samples += 1
             epoch_steps += 1
             
-            # LOGGING FREQUENCY CHANGED: EACH STEP
+            # LOGGING (Every Step? Or Every Update?)
+            # Let's log every step for now to see per-game stats
             if epoch_steps % 1 == 0:
-                 # Take mean of the last game's predictions or just the last step?
-                 # Let's take the Last Step of the last game processed
-                 last_score = score_seq[0, -1, 0].item()
-                 win_prob = (last_score + 1) / 2 * 100
-                 actual_win = (total_target_val / count + 1) / 2 * 100 if count > 0 else 50.0
-                 logger.info(f"Step {epoch_steps} | Loss: {avg_loss:.4f} | WinProb: {win_prob:.1f}% | ActualWin: {actual_win:.1f}%")
+                 # Last step probs
+                 last_probs = probs[0, -1] # [3]
+                 p_w = last_probs[0].item()
+                 
+                 win_prob = p_w * 100
+                 
+                 # Actual Win: map 1->100, 0->50, -1->0
+                 actual_win = (target_val + 1) / 2 * 100
+                 
+                 logger.info(f"Step {epoch_steps} | Loss: {avg_loss:.4f} | WinProb: {win_prob:.1f}% | ActualWin: {actual_win:.1f}% | TD: {loss_td.item():.4f} | Mat: {loss_aux_mat.item():.4f}")
 
 
     # Save Model
