@@ -5,3 +5,6 @@ output
 __pycache__
 agent
 input
+memory-bank
+.github
+.pytest_cache

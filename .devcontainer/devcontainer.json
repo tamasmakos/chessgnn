@@ -24,7 +24,7 @@
 		"vscode": {
 			// Set *default* container specific settings.json values on container create.
 			"settings": {
-				"python.defaultInterpreterPath": "/usr/bin/python"
+				"python.defaultInterpreterPath": "/opt/conda/bin/python"
 			},
 			// installs useful extensions
 			"extensions": [
@@ -48,9 +48,7 @@
 	// 7. Use 'initializeCommand' to run commands ON THE HOST before container is created or started.
 	// "initializeCommand": "",
 	// 8. Use 'onCreateCommand' to run commands INSIDE THE CONTAINER after it started for the first time.
-	// for the nvida containers, sh points to sh-wrap. We want it to point to dash
-	// https://wiki.debian.org/Shell
-	"onCreateCommand": "sudo ln -sf /usr/bin/dash /usr/bin/sh"
+	// "onCreateCommand": "",
 	// 9. Use 'updateContentCommand' to run commands if the root filetree have any changes, during container creation.
 	// "updateContentCommand": "",
 	// 10. Use 'postCreateCommand' to run commands after the container is created.

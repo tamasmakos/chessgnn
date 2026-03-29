@@ -1,7 +1,5 @@
-FROM nvcr.io/nvidia/pytorch:25.09-py3
-
-# Install PyTorch for CUDA 11.8 (Compatible with host driver 12.0)
-RUN pip install torch torchvision torchaudio --index-url https://download.pytorch.org/whl/cu118
+# pytorch/pytorch:2.7.1-cuda11.8-cudnn9-devel already ships torch 2.7.1+cu118
+FROM pytorch/pytorch:2.7.1-cuda11.8-cudnn9-devel
 
 # Install PyTorch Geometric and dependencies
 RUN pip install torch_geometric
