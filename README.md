@@ -28,44 +28,54 @@ Every chess position is converted to a `HeteroData` graph by `ChessGraphBuilder.
 | `(square, adjacent, square)` | Chebyshev-1 king-move adjacency |
 | `(piece, move, square)` | one edge per legal move (used by Q-head) |
 
-### 2. Spatial Reasoning — Weighted ST-HGAT
+### 2. Spatial Reasoning — Weighted HGT
 
-Three stacked `WeightedHGTConv` layers process the graph. Each layer uses separate key/query/value projections per node type and separate relation matrices per edge type. Edge weights fold into attention multiplicatively:
+`GATEAUChessModel` stacks `WeightedHGTConv` layers (default: 4). Each layer uses separate key/query/value projections per node type and separate relation matrices per edge type. Edge weights fold into attention multiplicatively:
 
 $$\alpha = \mathrm{softmax}\!\left(\frac{(h_i W_K)(h_j W_Q)^\top}{\sqrt{d}}\right) \cdot (1 + w_{ij})$$
 
-A `RayAlignmentBlock` follows the convolutions to amplify long-range piece influence along rays before pooling.
+LayerNorm is applied after each convolution. Layer 1 captures direct attacks and defenses. Layer 2 captures secondary support chains. Layer 3+ captures complex tactics — pins, batteries, discovered attacks.
 
-Layer 1 captures direct attacks and defenses. Layer 2 captures secondary support chains. Layer 3 captures complex tactics — pins, batteries, discovered attacks.
+### 3. Temporal Context — Three Modes
 
-### 3. Temporal Context — GRU over Game History
+`GATEAUChessModel` supports three temporal modes, selectable via `temporal_mode`:
 
-After spatial pooling, a GRU accumulates game history:
+| Mode | Description |
+|------|-------------|
+| `"none"` | No recurrence; value from spatial pooling only |
+| `"global_gru"` | GRU over $[\mathrm{pool}_\mathrm{piece} \| \mathrm{pool}_\mathrm{square}]$ per step |
+| `"node_gru"` | Separate `GRUCell` per node type; each piece/square carries its own hidden state |
 
 $$h_t = \mathrm{GRU}([\mathrm{pool}_\mathrm{piece} \| \mathrm{pool}_\mathrm{square}],\; h_{t-1})$$
 
-- **Batch mode** (`forward()`): processes the entire game sequence at once for training.
-- **Incremental mode** (`forward_step(h_prev)`): O(1) per move for online play — the `CaseTutor` caches `h_t` after each move.
+- **Sequence training** (`forward_sequence()`): iterates positions maintaining a `KVCache`.
+- **Incremental inference** (`forward_step(graph, cache)`): O(1) per move for online play.
 
 ### 4. Output Heads
 
 | Head | Output | Training signal |
 |------|--------|-----------------|
-| **Value** V(s) | [White win, Draw, Black win] logits | Game outcome regression + TD loss |
-| **Q-head** Q(s,a) | scalar per legal-move edge | KL divergence vs. Stockfish move distribution |
-| **Material** (aux) | normalized material imbalance | White − black material / 39 |
-| **Dominance** (aux) | positional dominance scalar | PageRank centrality difference |
+| **Value** V(s) | tanh scalar in [−1, 1] | Stockfish win-probability (distillation) or game outcome |
+| **Q-head** Q(s,a) | scalar per legal-move edge | KL divergence vs. Stockfish top-k move distribution |
+| **Material** (aux) | normalized material imbalance | White − black material / 39 (legacy `STHGATLikeModel`) |
+| **Dominance** (aux) | positional dominance scalar | PageRank centrality difference (legacy `STHGATLikeModel`) |
 
 ### 5. Training Loss
 
-$$\mathcal{L} = \mathcal{L}_\mathrm{outcome} + \lambda_1 \mathcal{L}_\mathrm{TD} + \lambda_2 \mathcal{L}_\mathrm{policy} + \lambda_3 \mathcal{L}_\mathrm{aux}$$
+Two training regimes are supported:
 
-- **Outcome**: MSE of V(s) vs. game result at every step along the mainline.
-- **TD**: forces $V(s_t) \approx V(s_{t+1})$, smoothing the win-probability curve across moves.
-- **Policy**: KL divergence between Q-head distribution and Stockfish top-k move scores (distillation).
-- **Auxiliary**: material and dominance predictions provide dense gradients early in training.
+**Baseline pretraining** (game-outcome regression on PGN, `train.py`):
 
-Gradient accumulation (`ACCUMULATION_STEPS = 16`) is used to compensate for batch size 1 (one game per step).
+$$\mathcal{L} = \mathcal{L}_\mathrm{outcome} + \lambda_1 \mathcal{L}_\mathrm{TD} + \lambda_2 \mathcal{L}_\mathrm{aux}$$
+
+**Distillation fine-tuning** (Stockfish-labelled positions, `distill_train.py`):
+
+$$\mathcal{L} = \lambda_V \cdot \mathcal{L}_\mathrm{value} + \lambda_Q \cdot \mathcal{L}_\mathrm{policy}$$
+
+- **Value**: MSE between V(s) and Stockfish win probability $wp = 1/(1+e^{-cp/400})$ for each position.
+- **Policy**: KL divergence between Q-head soft distribution and Stockfish top-k move scores.
+
+Gradient accumulation is used in both regimes to compensate for batch size 1.
 
 ---
 
@@ -97,40 +107,83 @@ Install all dependencies:
 pip install -r requirements.txt
 ```
 
-The Stockfish binary is included at `stockfish/src/stockfish` (Linux ELF). On Windows, point `STOCKFISH_PATH` in `train.py` to your local executable.
+The Stockfish binary is included at `stockfish/src/stockfish` (Linux ELF). On Windows, point `STOCKFISH_PATH` to your local executable.
 
-### Training
+### Baseline Pretraining
 
-Place a PGN file in `input/` and update the path constant at the top of `train.py`, then:
+Train `STHGATLikeModel` on raw game outcomes from a PGN file:
 
 ```bash
 python train.py
 ```
 
-The loop streams full game sequences from the PGN, computes the combined loss, and saves checkpoints to `output/st_hgat_model.pt`. A training log is written to `output/training.log`.
-
-Default hyperparameters (edit the `ALL_CAPS` constants in `train.py`):
+Streams full game sequences, computes outcome + TD + auxiliary loss, saves to `output/st_hgat_model.pt`. All hyperparameters are `ALL_CAPS` constants at the top of the file:
 
 | Constant | Default | Notes |
 |----------|---------|-------|
 | `HIDDEN_DIM` | 256 | GNN and GRU hidden size |
-| `NUM_LAYERS` | 3 | WeightedHGTConv stack depth |
+| `NUM_LAYERS` | 3 | `WeightedHGTConv` stack depth |
 | `LR` | 0.005 | Adam learning rate |
 | `ACCUMULATION_STEPS` | 16 | Effective batch size |
 | `EPOCHS` | 2 | Passes over the training PGN |
 | `TRAIN_GAMES` | 100 | Games to sample per epoch |
 
+### Distillation Training
+
+Train `GATEAUChessModel` directly on Stockfish-labelled positions using dual loss (value MSE + policy KL).
+
+**Step 1 — Generate labelled positions:**
+
+```bash
+python -m chessgnn.distillation_pipeline \
+  --pgn input/lichess_db_standard_rated_2013-01.pgn \
+  --out output/distillation_labels.jsonl \
+  --stockfish stockfish/src/stockfish \
+  --positions 10000 --depth 12 --multipv 5
+```
+
+| Flag | Default | Notes |
+|------|---------|-------|
+| `--positions` | 10000 | Total positions to label |
+| `--depth` | 12 | Stockfish search depth (higher = slower, better labels) |
+| `--multipv` | 5 | Top moves per position for policy target |
+| `--min-move` | 10 | Skip opening moves (low information) |
+| `--max-move` | 100 | Skip endgame tablebase territory |
+
+**Step 2 — Train:**
+
+```bash
+python distill_train.py
+```
+
+Reads the JSONL labels, builds move-edge graphs on the fly, and trains with gradient accumulation. Saves the best checkpoint (by top-1 move accuracy on the validation split) to `output/gateau_distilled.pt`. Key constants in `distill_train.py`:
+
+| Constant | Default | Notes |
+|----------|---------|-------|
+| `HIDDEN_DIM` | 128 | GNN hidden size |
+| `NUM_LAYERS` | 4 | `WeightedHGTConv` stack depth |
+| `TEMPORAL_MODE` | `"global_gru"` | `"none"` / `"global_gru"` / `"node_gru"` |
+| `LAMBDA_V` | 1.0 | Weight on value MSE loss |
+| `LAMBDA_Q` | 1.0 | Weight on policy KL loss |
+| `TEMPERATURE` | 1.0 | Softmax temperature for policy target |
+| `VALIDATION_SPLIT` | 0.1 | Fraction of data held out for validation |
+| `PRETRAIN_CHECKPOINT` | `None` | Path to load pretrained weights before distillation |
+
 ### Using the Tutor
 
 ```python
 import torch
-from chessgnn.model import STHGATLikeModel
+from chessgnn.graph_builder import ChessGraphBuilder
+from chessgnn.model import GATEAUChessModel
 from tutor import CaseTutor
 
-# Load model
 device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
-model = STHGATLikeModel(hidden_dim=256, num_layers=3)
-model.load_state_dict(torch.load("output/st_hgat_model.pt", map_location=device))
+
+builder = ChessGraphBuilder(use_global_node=True, use_move_edges=True)
+metadata = builder.get_metadata()
+
+model = GATEAUChessModel(metadata, hidden_channels=128, num_layers=4, temporal_mode="global_gru")
+model.load_state_dict(torch.load("output/gateau_distilled.pt", map_location=device))
 model.eval()
 
 tutor = CaseTutor(model, device)
@@ -150,18 +203,22 @@ print(f"Recommended: {best_move}  Win probability: {win_prob:.1%}")
 pytest tests/
 ```
 
+125 tests across all modules. All pass on the current codebase.
+
 ---
 
 ## Project Structure
 
 ```
 chessgnn/
-├── graph_builder.py      # FEN → HeteroData (nodes, edges, weights)
-├── model.py              # STHGATLikeModel, WeightedHGTConv, RayAlignmentBlock
-├── dataset.py            # PGN → full-game sequence yielder
-├── game_processor.py     # Stockfish evaluation pipeline
-├── position_to_graph.py  # Auxiliary ground-truth computation
-└── visualizer.py         # Win-probability video generation
+├── graph_builder.py           # FEN → HeteroData (nodes, edges, weights)
+├── model.py                   # GATEAUChessModel, STHGATLikeModel, WeightedHGTConv, KVCache
+├── dataset.py                 # PGN → full-game sequence yielder
+├── distillation_pipeline.py   # PGN sampler + Stockfish MultiPV evaluator + JSONL I/O
+├── distillation_dataset.py    # DistillationDataset, soft_policy_target()
+├── game_processor.py          # Game-level Stockfish evaluation for visualization
+├── position_to_graph.py       # Auxiliary ground-truth computation
+└── visualizer.py              # Win-probability video generation
 
 agent/
 ├── core.py               # LLM coaching agent
@@ -169,7 +226,8 @@ agent/
 ├── schema.py             # Pydantic schemas
 └── tools.py              # Agent tools (move explanation, etc.)
 
-train.py                  # Training entry point
+train.py                  # Baseline pretraining (PGN game outcomes)
+distill_train.py          # Distillation training (Stockfish labels, dual loss)
 tutor.py                  # CaseTutor — stateful inference
 
 tests/
@@ -177,10 +235,12 @@ tests/
 ├── test_inference.py
 ├── test_model.py
 ├── test_ray_alignment.py
-└── test_temporal_ablation.py
+├── test_temporal_ablation.py
+├── test_distillation_pipeline.py
+└── test_distillation_dataset.py
 
 input/                    # PGN datasets
-output/                   # Checkpoints, logs, videos
+output/                   # Checkpoints, logs, videos, JSONL labels
 stockfish/src/stockfish   # Bundled Stockfish binary (Linux)
 ```
 
@@ -188,17 +248,17 @@ stockfish/src/stockfish   # Bundled Stockfish binary (Linux)
 
 ## Roadmap
 
-| # | Task | Status |
-|---|------|--------|
-| Graph builder: global node, move edges, ablation flags | TASK001 | ✅ Done |
-| Edge-aware GATEAU-style layer + Q-head | TASK002 | ✅ Done |
-| Temporal ablation experiments | TASK003 | ✅ Done |
-| Engine distillation dataset pipeline | TASK004 | Pending |
-| Multi-task distillation training | TASK005 | Pending |
-| Evaluation harness (puzzles, Elo gauntlet) | TASK006 | Pending |
-| UCI wrapper for engine play | TASK007 | Pending |
-| Calibration (temperature scaling + reliability diagrams) | TASK008 | Pending |
-| Scaling experiments | TASK009 | Pending |
+| Task | Description | Status |
+|------|-------------|--------|
+| TASK001 | Graph builder: global node, move edges, ablation flags | ✅ Done |
+| TASK002 | Edge-aware GATEAU-style layer + Q-head | ✅ Done |
+| TASK003 | Temporal ablation experiments | ✅ Done |
+| TASK004 | Engine distillation dataset pipeline | ✅ Done |
+| TASK005 | Multi-task distillation training | ✅ Done |
+| TASK006 | Evaluation harness (puzzles, Elo gauntlet) | Pending |
+| TASK007 | UCI wrapper for engine play | Pending |
+| TASK008 | Calibration (temperature scaling + reliability diagrams) | Pending |
+| TASK009 | Scaling experiments | Pending |
 
 **Success targets**: ≥ 40% top-1 move agreement with Stockfish on tactical puzzles (searchless), provisional Elo ≥ 1600 vs. reduced-strength Stockfish, calibrated win probabilities (reliability diagram R² > 0.95).
 
@@ -206,9 +266,10 @@ stockfish/src/stockfish   # Bundled Stockfish binary (Linux)
 
 ## Known Limitations
 
-- `train.py` hardcodes Linux paths — adjust `INPUT_PGN` and `STOCKFISH_PATH` for other platforms.
+- `train.py` and `distill_train.py` hardcode Linux paths — adjust `PGN_FILE` and `STOCKFISH_PATH` for other platforms.
 - Stockfish binary is a Linux ELF; Windows users need a native `.exe` or WSL.
-- Positions with zero pieces (extreme edge cases) may break `Batch` construction in `forward()`.
+- `DistillationDataset` loads the full JSONL into memory; for datasets larger than ~2M positions, consider switching to memory-mapped or SQLite storage.
+- Positions with zero pieces (extreme edge cases) may break `Batch` construction in `STHGATLikeModel.forward()`.
 
 ---
 
