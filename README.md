@@ -85,9 +85,11 @@ For a given position the `CaseTutor` does:
 
 1. Run a single `forward_step()` with the cached GRU state → node and edge embeddings.
 2. Read Q-scores from each `(piece, move, square)` edge.
-3. Return `argmax` move + win probability + top-k analysis.
+3. Return `argmax` move + calibrated win probability + top-k ranking + uncertainty.
 
 No rollout, no MCTS, no alpha-beta. O(1) in the number of legal moves after the GNN pass.
+
+`recommend_move()` returns a 4-tuple `(best_move, win_prob, ranking, uncertainty)` where `uncertainty` is the normalised entropy $H/\log(M)$ of the Q-score softmax distribution over all $M$ legal moves (0 = certain, 1 = uniform).
 
 ---
 
@@ -130,9 +132,9 @@ Streams full game sequences, computes outcome + TD + auxiliary loss, saves to `o
 
 ### Distillation Training
 
-Train `GATEAUChessModel` directly on Stockfish-labelled positions using dual loss (value MSE + policy KL).
+Train `GATEAUChessModel` directly on Stockfish-labelled positions using dual loss (value MSE + policy KL). Two modes are supported: **offline** (pre-generate labels once) and **online** (Stockfish labels produced in a background thread while training proceeds).
 
-**Step 1 — Generate labelled positions:**
+**Offline — Step 1: Generate labelled positions:**
 
 ```bash
 python -m chessgnn.distillation_pipeline \
@@ -150,7 +152,7 @@ python -m chessgnn.distillation_pipeline \
 | `--min-move` | 10 | Skip opening moves (low information) |
 | `--max-move` | 100 | Skip endgame tablebase territory |
 
-**Step 2 — Train:**
+**Offline — Step 2: Train:**
 
 ```bash
 python distill_train.py
@@ -168,6 +170,29 @@ Reads the JSONL labels, builds move-edge graphs on the fly, and trains with grad
 | `TEMPERATURE` | 1.0 | Softmax temperature for policy target |
 | `VALIDATION_SPLIT` | 0.1 | Fraction of data held out for validation |
 | `PRETRAIN_CHECKPOINT` | `None` | Path to load pretrained weights before distillation |
+
+**Online — label and train simultaneously:**
+
+`OnlineDistillationDataset` (`chessgnn/online_distillation.py`) runs a daemon producer thread that walks the PGN, calls Stockfish, and pushes ready samples into a bounded queue. The DataLoader consumes them — so Stockfish I/O and backprop overlap in time with no intermediate JSONL file required.
+
+```bash
+python run_experiment.py --config configs/tiny_online.json
+```
+
+Online mode config keys (in addition to the standard run_experiment schema):
+
+| Key | Notes |
+|-----|-------|
+| `"online": true` | Enables online mode |
+| `"pgn_path"` | Lichess PGN source |
+| `"stockfish_path"` | Path to Stockfish binary |
+| `"total_positions"` | Positions to generate per epoch |
+| `"sf_depth"` | Stockfish depth (8 is fast; 12 is high quality) |
+| `"multipv_k"` | Top moves per position |
+| `"buffer_size"` | Queue depth (default 128) |
+| `"val_jsonl"` | Fixed JSONL for validation (since training data is streamed) |
+
+> **Constraint**: online mode requires `num_workers=0` in the DataLoader because Stockfish is a subprocess and is not fork-safe. This is enforced automatically.
 
 ### Using the Tutor
 
@@ -188,13 +213,80 @@ model.eval()
 
 tutor = CaseTutor(model, device)
 
+# Optional: load a calibration sidecar for temperature-scaled probabilities
+from chessgnn.calibration import TemperatureScaler
+scaler = TemperatureScaler.load("output/gateau_distilled.pt.calib.json")
+tutor.set_calibration(scaler)
+
 # Feed moves as they are played (FEN string after each move)
 tutor.update_state(fen_after_move_1)
 tutor.update_state(fen_after_move_2)
 
 # Get the recommended next move
-best_move, win_prob, analysis = tutor.recommend_move(current_fen)
-print(f"Recommended: {best_move}  Win probability: {win_prob:.1%}")
+best_move, win_prob, ranking, uncertainty = tutor.recommend_move(current_fen)
+print(f"Recommended: {best_move}  Win probability: {win_prob:.1%}  Uncertainty: {uncertainty:.2f}")
+```
+
+### Evaluation Harness
+
+Evaluate a trained model across three metrics using `chessgnn/eval.py`:
+
+```bash
+python -m chessgnn.eval \
+  --model output/gateau_distilled.pt \
+  --positions output/distillation_labels.jsonl \
+  --puzzles input/lichess_db_puzzle.csv \
+  --out output/eval_results.json
+```
+
+| Metric | Method | Description |
+|--------|--------|-------------|
+| **Top-1 / Top-k engine agreement** | `evaluate_engine_agreement()` | Fraction of positions where model's best move matches Stockfish's top-k |
+| **Puzzle accuracy** | `evaluate_puzzles()` | First-move accuracy on Lichess puzzle CSV |
+| **Value correlation** | `evaluate_value_correlation()` | Pearson R and Spearman ρ vs Stockfish win probability |
+
+For multi-model comparisons use `compare_models(models_dict, ...)` which returns `{name: {metric: value}}`.
+
+### UCI Engine
+
+`uci_engine.py` exposes the GNN as a standard UCI engine, compatible with any chess GUI (Arena, Cutechess-CLI, etc.):
+
+```bash
+# Searchless mode (argmax Q-head)
+python uci_engine.py
+
+# With a calibrated win-probability sidecar
+python uci_engine.py \
+  --model output/gateau_distilled.pt \
+  --calib output/gateau_distilled.pt.calib.json
+```
+
+The `go` command triggers a single forward pass and immediately emits `info score cp <cp> pv <move>` followed by `bestmove`. Win probability is converted to centipawns via $\mathrm{cp} = 111.714 \cdot \tanh(1.562 \cdot (p - 0.5))$.
+
+Supported UCI commands: `uci`, `isready`, `ucinewgame`, `position` (startpos/fen + moves), `go`, `stop`, `ponderhit`, `quit`.
+
+### Calibration
+
+Fit a temperature scalar $T$ on a held-out set of engine-evaluated positions so that predicted win probabilities match empirical win rates:
+
+```bash
+python calibrate.py \
+  --model output/gateau_distilled.pt \
+  --positions output/distillation_labels.jsonl
+```
+
+Outputs a `.calib.json` sidecar (same stem as the checkpoint) and two reliability-diagram PNGs (before/after calibration). The `TemperatureScaler` minimises soft NLL via L-BFGS-B.
+
+```python
+from chessgnn.calibration import TemperatureScaler, reliability_diagram
+
+scaler = TemperatureScaler()
+scaler.fit(logits, targets)          # optimise T on calibration set
+print(scaler.ece(probs, targets))    # Expected Calibration Error
+scaler.save("model.calib.json")
+
+fig = reliability_diagram(probs, targets)
+fig.savefig("reliability.png")
 ```
 
 ### Running Tests
@@ -203,7 +295,8 @@ print(f"Recommended: {best_move}  Win probability: {win_prob:.1%}")
 pytest tests/
 ```
 
-125 tests across all modules. All pass on the current codebase.
+172 tests across all modules. All pass on the current codebase.
+
 
 ---
 
@@ -216,6 +309,9 @@ chessgnn/
 ├── dataset.py                 # PGN → full-game sequence yielder
 ├── distillation_pipeline.py   # PGN sampler + Stockfish MultiPV evaluator + JSONL I/O
 ├── distillation_dataset.py    # DistillationDataset, soft_policy_target()
+├── online_distillation.py     # OnlineDistillationDataset — streaming Stockfish labels
+├── eval.py                    # Evaluator: puzzle accuracy, engine agreement, value correlation
+├── calibration.py             # TemperatureScaler, reliability_diagram
 ├── game_processor.py          # Game-level Stockfish evaluation for visualization
 ├── position_to_graph.py       # Auxiliary ground-truth computation
 └── visualizer.py              # Win-probability video generation
@@ -228,7 +324,10 @@ agent/
 
 train.py                  # Baseline pretraining (PGN game outcomes)
 distill_train.py          # Distillation training (Stockfish labels, dual loss)
-tutor.py                  # CaseTutor — stateful inference
+run_experiment.py         # Scaling sweep runner — reads JSON config, logs to CSV
+tutor.py                  # CaseTutor — stateful inference with uncertainty
+uci_engine.py             # UCI wrapper for engine gauntlets and GUIs
+calibrate.py              # CLI: fit TemperatureScaler and save .calib.json sidecar
 
 tests/
 ├── test_graph_builder.py
@@ -237,10 +336,20 @@ tests/
 ├── test_ray_alignment.py
 ├── test_temporal_ablation.py
 ├── test_distillation_pipeline.py
-└── test_distillation_dataset.py
+├── test_distillation_dataset.py
+├── test_eval_harness.py
+└── test_calibration.py
 
-input/                    # PGN datasets
-output/                   # Checkpoints, logs, videos, JSONL labels
+configs/
+├── tiny_test.json       # h32/l2, 15 epochs, offline
+├── tiny_online.json     # h32/l2, 1 epoch, online streaming
+├── medium.json          # h64/l3, 20 epochs, offline
+├── small_long.json      # h64/l3, 50 epochs, offline (convergence check)
+├── sweep_d500.json      # architecture sweep over 500 positions
+└── sweep_d5k.json       # architecture sweep over 5 000 positions
+
+input/                    # PGN datasets and Lichess puzzle CSV
+output/                   # Checkpoints, JSONL labels, .calib.json sidecars, reliability PNGs
 stockfish/src/stockfish   # Bundled Stockfish binary (Linux)
 ```
 
@@ -255,10 +364,14 @@ stockfish/src/stockfish   # Bundled Stockfish binary (Linux)
 | TASK003 | Temporal ablation experiments | ✅ Done |
 | TASK004 | Engine distillation dataset pipeline | ✅ Done |
 | TASK005 | Multi-task distillation training | ✅ Done |
-| TASK006 | Evaluation harness (puzzles, Elo gauntlet) | Pending |
-| TASK007 | UCI wrapper for engine play | Pending |
-| TASK008 | Calibration (temperature scaling + reliability diagrams) | Pending |
-| TASK009 | Scaling experiments | Pending |
+| TASK006 | Evaluation harness (puzzles, engine agreement, value correlation) | ✅ Done |
+| TASK007 | UCI wrapper for engine play | ✅ Done |
+| TASK008 | Calibration (temperature scaling + reliability diagrams) | ✅ Done |
+| TASK009 | Scaling experiments | 🔄 In progress |
+
+**Current results** (2 564 positions, depth 8, CPU + CUDA):
+- `gateau_tiny_online` (h32/l2, 1 epoch): **27% puzzle accuracy**, 22.5% top-1 engine agreement, Pearson R=0.33
+- `gateau_medium` (h64/l3, 3 epochs so far): **32%+ val top-1** and climbing — loss still decreasing steadily
 
 **Success targets**: ≥ 40% top-1 move agreement with Stockfish on tactical puzzles (searchless), provisional Elo ≥ 1600 vs. reduced-strength Stockfish, calibrated win probabilities (reliability diagram R² > 0.95).
 
@@ -268,8 +381,10 @@ stockfish/src/stockfish   # Bundled Stockfish binary (Linux)
 
 - `train.py` and `distill_train.py` hardcode Linux paths — adjust `PGN_FILE` and `STOCKFISH_PATH` for other platforms.
 - Stockfish binary is a Linux ELF; Windows users need a native `.exe` or WSL.
+- `OnlineDistillationDataset` requires `num_workers=0` in the DataLoader (Stockfish subprocess is not fork-safe).
 - `DistillationDataset` loads the full JSONL into memory; for datasets larger than ~2M positions, consider switching to memory-mapped or SQLite storage.
 - Positions with zero pieces (extreme edge cases) may break `Batch` construction in `STHGATLikeModel.forward()`.
+- Positions with zero legal moves (checkmate/stalemate mid-sequence) produce empty `policy_target` tensors; both training and validation loops skip these automatically.
 
 ---
 
