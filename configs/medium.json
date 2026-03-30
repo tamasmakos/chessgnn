@@ -1,0 +1,18 @@
+{
+  "run_name": "gateau_medium",
+  "hidden_channels": 64,
+  "num_layers": 3,
+  "temporal_mode": "global_gru",
+  "data_jsonl": "output/distillation_labels_5k.jsonl",
+  "epochs": 5,
+  "lr": 5e-4,
+  "accumulation_steps": 16,
+  "lambda_v": 1.0,
+  "lambda_q": 2.0,
+  "temperature": 1.5,
+  "val_split": 0.15,
+  "puzzle_csv": "input/lichess_db_puzzle.csv/lichess_db_puzzle.csv",
+  "n_puzzles": 200,
+  "eval_k": 3,
+  "results_csv": "output/scaling_results.csv"
+}

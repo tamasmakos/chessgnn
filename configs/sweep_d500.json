@@ -1,0 +1,72 @@
+{
+  "experiments": [
+    {
+      "run_name": "gateau_h64_l3_d500",
+      "hidden_channels": 64,
+      "num_layers": 3,
+      "temporal_mode": "global_gru",
+      "data_jsonl": "output/distillation_labels.jsonl",
+      "epochs": 15,
+      "lr": 1e-3,
+      "accumulation_steps": 32,
+      "lambda_v": 1.0,
+      "lambda_q": 1.0,
+      "temperature": 1.0,
+      "val_split": 0.1,
+      "puzzle_csv": "input/lichess_db_puzzle.csv/lichess_db_puzzle.csv",
+      "n_puzzles": 25,
+      "eval_k": 3
+    },
+    {
+      "run_name": "gateau_h128_l4_d500",
+      "hidden_channels": 128,
+      "num_layers": 4,
+      "temporal_mode": "global_gru",
+      "data_jsonl": "output/distillation_labels.jsonl",
+      "epochs": 15,
+      "lr": 1e-3,
+      "accumulation_steps": 32,
+      "lambda_v": 1.0,
+      "lambda_q": 1.0,
+      "temperature": 1.0,
+      "val_split": 0.1,
+      "puzzle_csv": "input/lichess_db_puzzle.csv/lichess_db_puzzle.csv",
+      "n_puzzles": 25,
+      "eval_k": 3
+    },
+    {
+      "run_name": "gateau_h256_l6_d500",
+      "hidden_channels": 256,
+      "num_layers": 6,
+      "temporal_mode": "global_gru",
+      "data_jsonl": "output/distillation_labels.jsonl",
+      "epochs": 15,
+      "lr": 5e-4,
+      "accumulation_steps": 32,
+      "lambda_v": 1.0,
+      "lambda_q": 1.0,
+      "temperature": 1.0,
+      "val_split": 0.1,
+      "puzzle_csv": "input/lichess_db_puzzle.csv/lichess_db_puzzle.csv",
+      "n_puzzles": 25,
+      "eval_k": 3
+    },
+    {
+      "run_name": "gateau_h512_l8_d500",
+      "hidden_channels": 512,
+      "num_layers": 8,
+      "temporal_mode": "global_gru",
+      "data_jsonl": "output/distillation_labels.jsonl",
+      "epochs": 15,
+      "lr": 2e-4,
+      "accumulation_steps": 32,
+      "lambda_v": 1.0,
+      "lambda_q": 1.0,
+      "temperature": 1.0,
+      "val_split": 0.1,
+      "puzzle_csv": "input/lichess_db_puzzle.csv/lichess_db_puzzle.csv",
+      "n_puzzles": 25,
+      "eval_k": 3
+    }
+  ]
+}

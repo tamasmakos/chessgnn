@@ -1,0 +1,18 @@
+{
+  "run_name": "gateau_h64_l3_d500_long",
+  "hidden_channels": 64,
+  "num_layers": 3,
+  "temporal_mode": "global_gru",
+  "data_jsonl": "output/distillation_labels.jsonl",
+  "epochs": 50,
+  "lr": 1e-3,
+  "accumulation_steps": 16,
+  "lambda_v": 1.0,
+  "lambda_q": 1.0,
+  "temperature": 1.0,
+  "val_split": 0.1,
+  "puzzle_csv": "input/lichess_db_puzzle.csv/lichess_db_puzzle.csv",
+  "n_puzzles": 50,
+  "eval_k": 3,
+  "results_csv": "output/scaling_results.csv"
+}
