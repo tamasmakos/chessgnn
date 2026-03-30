@@ -24,9 +24,11 @@ import os
 from typing import Sequence
 
 import chess
+import chess.pgn
 import numpy as np
 import torch
 
+from .calibration import TemperatureScaler
 from .distillation_pipeline import load_jsonl
 from .graph_builder import ChessGraphBuilder
 
@@ -65,6 +67,58 @@ def _spearman_rho(x: np.ndarray, y: np.ndarray) -> float:
     from scipy.stats import rankdata  # scipy is available in this environment
 
     return _pearson_r(rankdata(x), rankdata(y))
+
+
+def brier_score(probs: np.ndarray, outcomes: np.ndarray) -> float:
+    """Mean squared error between predicted probabilities and binary outcomes.
+
+    Parameters
+    ----------
+    probs : np.ndarray, shape (N,)
+        Predicted win probabilities in [0, 1].
+    outcomes : np.ndarray, shape (N,)
+        Observed outcomes in {0.0, 0.5, 1.0}.
+
+    Returns
+    -------
+    float
+        Brier score ∈ [0, 1]; lower is better.
+    """
+    p = np.asarray(probs, dtype=np.float64)
+    o = np.asarray(outcomes, dtype=np.float64)
+    if len(p) == 0:
+        return 0.0
+    return float(np.mean((p - o) ** 2))
+
+
+def log_loss_metric(
+    probs: np.ndarray,
+    outcomes: np.ndarray,
+    eps: float = 1e-7,
+) -> float:
+    """Binary cross-entropy between predicted probabilities and outcomes.
+
+    Draws (outcome=0.5) are handled as soft targets.
+
+    Parameters
+    ----------
+    probs : np.ndarray, shape (N,)
+        Predicted win probabilities in [0, 1].
+    outcomes : np.ndarray, shape (N,)
+        Observed outcomes in {0.0, 0.5, 1.0}.
+    eps : float
+        Clipping threshold to avoid log(0).
+
+    Returns
+    -------
+    float
+        Log-loss ≥ 0; lower is better.
+    """
+    p = np.clip(np.asarray(probs, dtype=np.float64), eps, 1.0 - eps)
+    o = np.asarray(outcomes, dtype=np.float64)
+    if len(p) == 0:
+        return 0.0
+    return float(-np.mean(o * np.log(p) + (1.0 - o) * np.log(1.0 - p)))
 
 
 # ---------------------------------------------------------------------------
@@ -445,6 +499,95 @@ class Evaluator:
         plt.close(fig)
         logger.info("Reliability diagram saved to %s", out_path)
         return bin_stats
+
+    def evaluate_pgn_outcomes(
+        self,
+        pgn_path: str,
+        max_games: int = 0,
+    ) -> dict[str, float | int]:
+        """Evaluate win-probability quality against real game outcomes from a PGN.
+
+        Parses every position in each game, predicts win probability via the
+        value head, and compares against the game result (white's perspective).
+        Draws are treated as outcome 0.5.  Games with unknown result (``*``) are
+        skipped.
+
+        Parameters
+        ----------
+        pgn_path : str
+            Path to a PGN file.  May contain multiple games.
+        max_games : int
+            Maximum games to read.  0 means read all games in the file.
+
+        Returns
+        -------
+        dict with keys:
+
+        * ``brier_score``  — mean squared error between predicted prob and outcome.
+        * ``log_loss``     — binary cross-entropy (soft targets for draws).
+        * ``ece``          — Expected Calibration Error.
+        * ``n_positions``  — total positions evaluated.
+        * ``n_games``      — total games used.
+        """
+        _RESULT_MAP = {"1-0": 1.0, "0-1": 0.0, "1/2-1/2": 0.5}
+
+        all_preds: list[float] = []
+        all_outcomes: list[float] = []
+        n_games = 0
+
+        with open(pgn_path) as pgn_fh:
+            while True:
+                if max_games > 0 and n_games >= max_games:
+                    break
+                game = chess.pgn.read_game(pgn_fh)
+                if game is None:
+                    break
+                result_str = game.headers.get("Result", "*")
+                outcome = _RESULT_MAP.get(result_str)
+                if outcome is None:
+                    continue
+
+                board = game.board()
+                for move in game.mainline_moves():
+                    fen = board.fen()
+                    pred = self._predict_value(fen)
+                    all_preds.append(pred)
+                    all_outcomes.append(outcome)
+                    board.push(move)
+
+                n_games += 1
+
+        preds_arr = np.array(all_preds, dtype=np.float64)
+        outcomes_arr = np.array(all_outcomes, dtype=np.float64)
+
+        if len(preds_arr) == 0:
+            result = {
+                "brier_score": 0.0,
+                "log_loss": 0.0,
+                "ece": 0.0,
+                "n_positions": 0,
+                "n_games": 0,
+            }
+        else:
+            _scaler = TemperatureScaler()
+            result = {
+                "brier_score": brier_score(preds_arr, outcomes_arr),
+                "log_loss": log_loss_metric(preds_arr, outcomes_arr),
+                "ece": _scaler.ece(preds_arr, outcomes_arr),
+                "n_positions": len(preds_arr),
+                "n_games": n_games,
+            }
+
+        logger.info(
+            "PGN outcomes — Brier=%.4f  LogLoss=%.4f  ECE=%.4f  "
+            "(positions=%d  games=%d)",
+            result["brier_score"],
+            result["log_loss"],
+            result["ece"],
+            result["n_positions"],
+            result["n_games"],
+        )
+        return result
 
 
 # ---------------------------------------------------------------------------

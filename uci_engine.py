@@ -27,6 +27,7 @@ import math
 import sys
 
 import chess
+import chess.polyglot
 import torch
 
 from chessgnn.calibration import TemperatureScaler
@@ -39,6 +40,7 @@ from tutor import CaseTutor
 # ---------------------------------------------------------------------------
 
 MODEL_PATH = "output/gateau_distilled.pt"
+DEFAULT_BOOK_PATH = "input/chessgnn.bin"
 ENGINE_NAME = "ChessGNN"
 ENGINE_AUTHOR = "chessgnn"
 
@@ -164,6 +166,7 @@ class UCIEngine:
         model_path: str = MODEL_PATH,
         device_str: str = "cpu",
         temperature_path: str | None = None,
+        book_path: str | None = DEFAULT_BOOK_PATH,
     ) -> None:
         self._device = torch.device(device_str)
         model = _load_model(model_path, self._device)
@@ -176,6 +179,16 @@ class UCIEngine:
             self._tutor.set_calibration(self._scaler)
             logger.info("Calibration loaded from %s (T=%.4f)", temperature_path, self._scaler.T)
 
+        self._book_path: str | None = book_path
+        if book_path is not None:
+            import os
+            if os.path.isfile(book_path):
+                logger.info("Opening book: %s", book_path)
+            else:
+                logger.warning("Opening book not found at %s — book disabled", book_path)
+                self._book_path = None
+
+        self._current_board: chess.Board = chess.Board()
         self._current_fen: str = _STARTPOS_FEN
 
     # ------------------------------------------------------------------
@@ -195,6 +208,7 @@ class UCIEngine:
 
     def _handle_ucinewgame(self) -> None:
         self._tutor.reset()
+        self._current_board = chess.Board()
         self._current_fen = _STARTPOS_FEN
         logger.debug("New game: hidden state reset")
 
@@ -203,10 +217,41 @@ class UCIEngine:
         # Advance GRU state for each committed move in history
         for fen in history_fens:
             self._tutor.update_state(fen)
+        self._current_board = board
         self._current_fen = board.fen()
         logger.debug("Position set: %s", self._current_fen)
 
+    def _book_move(self) -> chess.Move | None:
+        if self._book_path is None:
+            return None
+        try:
+            with chess.polyglot.open_reader(self._book_path) as reader:
+                entries = list(reader.find_all(self._current_board))
+            if not entries:
+                return None
+            # Weighted random selection proportional to book weight
+            total = sum(e.weight for e in entries)
+            import random
+            r = random.randint(0, total - 1)
+            cumulative = 0
+            for entry in entries:
+                cumulative += entry.weight
+                if r < cumulative:
+                    return entry.move
+            return entries[-1].move
+        except Exception as exc:
+            logger.warning("Book lookup failed: %s", exc)
+            return None
+
     def _handle_go(self) -> None:
+        book_move = self._book_move()
+        if book_move is not None:
+            logger.debug("go → book move %s", book_move.uci())
+            print(f"info string book move")
+            print(f"bestmove {book_move.uci()}")
+            sys.stdout.flush()
+            return
+
         result = self._tutor.recommend_move(self._current_fen)
         best_move, best_prob, _ranking, uncertainty = result
 
@@ -283,6 +328,17 @@ def _parse_args() -> argparse.Namespace:
         metavar="CALIB_JSON",
         help="Path to temperature calibration JSON sidecar (optional)",
     )
+    parser.add_argument(
+        "--book",
+        default=DEFAULT_BOOK_PATH,
+        metavar="BOOK_BIN",
+        help="Path to polyglot opening book .bin file (default: %(default)s)",
+    )
+    parser.add_argument(
+        "--no-book",
+        action="store_true",
+        help="Disable opening book; use GNN from move 1",
+    )
     return parser.parse_args()
 
 
@@ -292,4 +348,5 @@ if __name__ == "__main__":
         model_path=args.model,
         device_str=args.device,
         temperature_path=args.calib,
+        book_path=None if args.no_book else args.book,
     ).run()
