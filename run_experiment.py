@@ -146,6 +146,7 @@ def train_model(cfg: dict, device: torch.device) -> tuple[GATEAUChessModel, dict
                 multipv_k=cfg.get("multipv_k", 5),
                 buffer_size=cfg.get("buffer_size", 128),
                 temperature=temp,
+                num_sf_workers=cfg.get("num_sf_workers", 4),
             ),
             batch_size=1,
             collate_fn=distillation_collate,
