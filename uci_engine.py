@@ -190,6 +190,7 @@ class UCIEngine:
 
         self._current_board: chess.Board = chess.Board()
         self._current_fen: str = _STARTPOS_FEN
+        self._elo_norm: float = 1.0  # 1.0 = Stockfish/perfect play perspective
 
     # ------------------------------------------------------------------
     # Command handlers
@@ -199,6 +200,7 @@ class UCIEngine:
         print(f"id name {ENGINE_NAME}")
         print(f"id author {ENGINE_AUTHOR}")
         print("option name Hash type spin default 1 min 1 max 1")
+        print("option name Elo type spin default 3000 min 100 max 3000")
         print("uciok")
         sys.stdout.flush()
 
@@ -243,6 +245,23 @@ class UCIEngine:
             logger.warning("Book lookup failed: %s", exc)
             return None
 
+    def _handle_setoption(self, tokens: list[str]) -> None:
+        """Handle ``setoption name <name> value <value>``."""
+        try:
+            name_idx = tokens.index("name") + 1
+            val_idx = tokens.index("value") + 1
+        except ValueError:
+            return
+        option_name = " ".join(tokens[name_idx:val_idx - 1]).lower()
+        option_value = " ".join(tokens[val_idx:])
+        if option_name == "elo":
+            try:
+                elo = int(option_value)
+                self._elo_norm = min(max(elo, 100), 3000) / 3000.0
+                logger.info("ELO set to %d (elo_norm=%.4f)", elo, self._elo_norm)
+            except ValueError:
+                logger.warning("Invalid ELO value: %s", option_value)
+
     def _handle_go(self) -> None:
         book_move = self._book_move()
         if book_move is not None:
@@ -252,7 +271,8 @@ class UCIEngine:
             sys.stdout.flush()
             return
 
-        result = self._tutor.recommend_move(self._current_fen)
+        user_elo = round(self._elo_norm * 3000) if self._elo_norm < 1.0 else None
+        result = self._tutor.recommend_move(self._current_fen, user_elo=user_elo)
         best_move, best_prob, _ranking, uncertainty = result
 
         if best_move is None:
@@ -292,6 +312,8 @@ class UCIEngine:
                 self._handle_isready()
             elif cmd == "ucinewgame":
                 self._handle_ucinewgame()
+            elif cmd == "setoption":
+                self._handle_setoption(tokens[1:])
             elif cmd == "position":
                 self._handle_position(tokens[1:])
             elif cmd == "go":

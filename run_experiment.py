@@ -43,18 +43,30 @@ import time
 
 import torch
 import torch.nn.functional as F
-from torch.utils.data import DataLoader, Subset
+from torch.utils.data import DataLoader, IterableDataset, Subset
 from tqdm import tqdm
 
 from chessgnn.calibration import TemperatureScaler
 from chessgnn.distillation_dataset import DistillationDataset, distillation_collate
-from chessgnn.distillation_pipeline import load_jsonl
+from chessgnn.distillation_pipeline import load_jsonl, save_game_labels_jsonl
 from chessgnn.eval import Evaluator
 from chessgnn.graph_builder import ChessGraphBuilder
 from chessgnn.model import GATEAUChessModel
-from chessgnn.online_distillation import OnlineDistillationDataset
+from chessgnn.online_distillation import (
+    GameSequenceOfflineDataset,
+    OnlineDistillationDataset,
+)
 
 os.makedirs("output", exist_ok=True)
+
+try:
+    import matplotlib
+    matplotlib.use("Agg")
+    import matplotlib.pyplot as plt
+    _MATPLOTLIB_AVAILABLE = True
+except ImportError:
+    _MATPLOTLIB_AVAILABLE = False
+
 logging.basicConfig(
     level=logging.INFO,
     format="%(asctime)s | %(levelname)s | %(message)s",
@@ -83,6 +95,230 @@ RESULTS_CSV_FIELDS = [
 # ---------------------------------------------------------------------------
 # Training helpers (mirrors distill_train.py but takes explicit config dict)
 # ---------------------------------------------------------------------------
+
+
+def _save_training_plot(history: list[dict], path: str) -> None:
+    """Save a two-panel training plot (loss curves + val accuracy) to *path*."""
+    if not _MATPLOTLIB_AVAILABLE or not history:
+        return
+    epochs = [h["epoch"] for h in history]
+
+    fig, (ax_l, ax_v) = plt.subplots(1, 2, figsize=(12, 5))
+
+    # Left panel — loss components
+    ax_l.plot(epochs, [h["loss"] for h in history], label="total")
+    if "v_sf" in history[0]:
+        ax_l.plot(epochs, [h["v_sf"] for h in history], label="v_sf", linestyle="--")
+        ax_l.plot(epochs, [h["v_out"] for h in history], label="v_out", linestyle="--")
+    elif "v_loss" in history[0]:
+        ax_l.plot(epochs, [h["v_loss"] for h in history], label="v_loss", linestyle="--")
+    if "q" in history[0]:
+        ax_l.plot(epochs, [h["q"] for h in history], label="q", linestyle=":")
+    ax_l.set_xlabel("Epoch")
+    ax_l.set_ylabel("Loss")
+    ax_l.set_title("Training Loss")
+    ax_l.legend()
+
+    # Right panel — validation accuracy
+    ax_v.plot(epochs, [h["val_top1"] * 100 for h in history], label="val top-1 %", marker="o")
+    ax_v.plot(epochs, [h["val_top3"] * 100 for h in history], label="val top-3 %", marker="s")
+    ax_v.set_xlabel("Epoch")
+    ax_v.set_ylabel("Accuracy (%)")
+    ax_v.set_title("Validation Accuracy")
+    ax_v.legend()
+
+    fig.tight_layout()
+    os.makedirs(os.path.dirname(path) or ".", exist_ok=True)
+    fig.savefig(path, dpi=120, bbox_inches="tight")
+    plt.close(fig)
+    logger.info("Training plot saved to %s", path)
+
+
+
+
+def _train_sequential(
+    model: GATEAUChessModel,
+    cfg: dict,
+    device: torch.device,
+    val_loader,
+) -> tuple[dict, str]:
+    """Sequential (game-level) training loop.  Returns (best_metrics, checkpoint_path)."""
+    epochs = cfg.get("epochs", 1)
+    lr = cfg.get("lr", 1e-3)
+    accum = cfg.get("accumulation_steps", 16)
+    lv = cfg.get("lambda_v", 1.0)
+    lq = cfg.get("lambda_q", 1.0)
+    l_out = cfg.get("lambda_outcome", 0.5)
+    temp = cfg.get("temperature", 1.0)
+    run_name = cfg["run_name"]
+    total_games = cfg["total_games"]
+    checkpoint_path = f"output/{run_name}.pt"
+
+    train_ds: IterableDataset
+    game_jsonl = cfg.get("game_jsonl")
+
+    if not game_jsonl:
+        # ---- Distillation phase: label all games before training starts ----
+        game_jsonl = f"output/{run_name}_game_labels.jsonl"
+
+    if not os.path.exists(game_jsonl):
+        logger.info("[%s] Distillation phase: labelling %d games → %s",
+                    run_name, total_games, game_jsonl)
+        save_game_labels_jsonl(
+            pgn_path=cfg["pgn_path"],
+            stockfish_path=cfg.get("stockfish_path", "/usr/games/stockfish"),
+            out_path=game_jsonl,
+            max_games=total_games,
+            depth=cfg.get("sf_depth", 8),
+            multipv_k=cfg.get("multipv_k", 5),
+            num_workers=cfg.get("num_sf_workers", 4),
+        )
+    else:
+        logger.info("[%s] Reusing existing game labels: %s", run_name, game_jsonl)
+
+    # ---- Training phase: load from JSONL (no Stockfish during training) ----
+    train_ds = GameSequenceOfflineDataset(game_jsonl, temperature=temp)
+    dl_num_workers = min(cfg.get("dl_workers", 4), os.cpu_count() or 1)
+    logger.info("[%s] Training phase: %d games, %d DataLoader workers",
+                run_name, len(train_ds), dl_num_workers)
+
+    train_loader = DataLoader(
+        train_ds, batch_size=1, collate_fn=lambda b: b[0],
+        num_workers=dl_num_workers,
+        pin_memory=(dl_num_workers > 0),
+        prefetch_factor=(4 if dl_num_workers > 0 else None),
+        persistent_workers=(dl_num_workers > 0),
+    )
+
+    optimizer = torch.optim.Adam(model.parameters(), lr=lr)
+    best_top1 = -1.0
+    best_metrics: dict = {}
+    history: list[dict] = []
+    t_start = time.time()
+    params = sum(p.numel() for p in model.parameters())
+
+    for epoch in range(epochs):
+        model.train()
+        total_loss = total_v_sf = total_v_out = total_q = 0.0
+        step = 0
+        optimizer.zero_grad()
+        pbar = tqdm(
+            train_loader,
+            desc=f"[{run_name}] Seq Epoch {epoch+1}/{epochs}",
+            leave=False,
+        )
+
+        for i, game in enumerate(pbar):
+            graphs = [g.to(device, non_blocking=True) for g in game["graphs"]]
+            sf_targets = game["value_targets_sf"].to(device, non_blocking=True)
+            outcome_targets = game["value_targets_outcome"].to(device, non_blocking=True)
+            policy_targets_list = game["policy_targets"]
+            elo_norm: float = float(game["elo_norm"])
+            T = len(graphs)
+
+            # One backbone pass → two value decodings (SF + player ELO)
+            values_sf, values_player, q_scores_list, _ = model.forward_sequence_with_q_dual(
+                graphs, elo_norm_sf=1.0, elo_norm_player=elo_norm
+            )
+
+            l_v_sf = F.mse_loss(values_sf.squeeze(-1), sf_targets)
+            l_v_out = F.mse_loss(values_player.squeeze(-1), outcome_targets)
+
+            l_q_sum = torch.tensor(0.0, device=device)
+            valid_t = 0
+            for t_idx in range(T):
+                pt = policy_targets_list[t_idx]
+                if not isinstance(pt, torch.Tensor):
+                    continue
+                pt = pt.to(device)
+                if pt.numel() == 0:
+                    continue
+                q = q_scores_list[t_idx]
+                log_q = F.log_softmax(q / temp, dim=0)
+                l_q_sum = l_q_sum + F.kl_div(log_q, pt, reduction="sum")
+                valid_t += 1
+            l_q_mean = l_q_sum / max(valid_t, 1)
+
+            loss = (lv * l_v_sf + l_out * l_v_out + lq * l_q_mean) / accum
+            loss.backward()
+
+            if not math.isnan(loss.item()):
+                total_loss += loss.item() * accum
+                total_v_sf += l_v_sf.item()
+                total_v_out += l_v_out.item()
+                total_q += l_q_mean.item()
+            step += 1
+
+            if (i + 1) % accum == 0:
+                torch.nn.utils.clip_grad_norm_(model.parameters(), 1.0)
+                optimizer.step()
+                optimizer.zero_grad()
+            pbar.set_postfix(
+                loss=f"{total_loss/step:.4f}",
+                v_sf=f"{total_v_sf/step:.4f}",
+                q=f"{total_q/step:.4f}",
+            )
+
+        torch.nn.utils.clip_grad_norm_(model.parameters(), 1.0)
+        optimizer.step()
+        optimizer.zero_grad()
+
+        m = _validate(model, val_loader, device, temp)
+        history.append({
+            "epoch": epoch + 1,
+            "loss": total_loss / max(step, 1),
+            "v_sf": total_v_sf / max(step, 1),
+            "v_out": total_v_out / max(step, 1),
+            "q": total_q / max(step, 1),
+            "val_top1": m["val_top1_acc"],
+            "val_top3": m["val_top3_acc"],
+        })
+        logger.info(
+            "[%s] Epoch %d/%d  loss=%.4f (v_sf=%.4f v_out=%.4f q=%.4f)  "
+            "val_top1=%.1f%%  val_top3=%.1f%%",
+            run_name, epoch + 1, epochs,
+            total_loss / max(step, 1),
+            total_v_sf / max(step, 1),
+            total_v_out / max(step, 1),
+            total_q / max(step, 1),
+            m["val_top1_acc"] * 100, m["val_top3_acc"] * 100,
+        )
+        if m["val_top1_acc"] > best_top1:
+            best_top1 = m["val_top1_acc"]
+            best_metrics = {
+                "best_val_top1": m["val_top1_acc"],
+                "best_val_top3": m["val_top3_acc"],
+                "best_val_v_mse": m["val_v_mse"],
+                "best_val_q_kl": m["val_q_kl"],
+                "params": params, "data_size": total_games,
+                "train_time_s": time.time() - t_start,
+                "checkpoint": checkpoint_path,
+            }
+            torch.save(model.state_dict(), checkpoint_path)
+            logger.info("[%s]   → new best top-1 %.1f%%", run_name, best_top1 * 100)
+
+    if not best_metrics:
+        m = _validate(model, val_loader, device, temp)
+        best_metrics = {
+            "best_val_top1": m["val_top1_acc"],
+            "best_val_top3": m["val_top3_acc"],
+            "best_val_v_mse": m["val_v_mse"],
+            "best_val_q_kl": m["val_q_kl"],
+            "params": params, "data_size": total_games,
+            "train_time_s": time.time() - t_start,
+            "checkpoint": checkpoint_path,
+        }
+        torch.save(model.state_dict(), checkpoint_path)
+
+    plot_path = f"output/{run_name}_training.png"
+    _save_training_plot(history, plot_path)
+    logger.info(
+        "[%s] Sequential training done in %.0fs.  Best val top-1: %.1f%%",
+        run_name, best_metrics["train_time_s"], best_top1 * 100,
+    )
+    model.load_state_dict(torch.load(checkpoint_path, map_location=device))
+    model.eval()
+    return best_metrics, checkpoint_path
 
 
 def _validate(model, val_loader, device, temperature):
@@ -131,6 +367,19 @@ def train_model(cfg: dict, device: torch.device) -> tuple[GATEAUChessModel, dict
 
     builder = ChessGraphBuilder(use_global_node=True, use_move_edges=True)
 
+    # --- Build val_loader (shared across all modes) ---
+    val_jsonl = cfg.get("val_jsonl") or cfg.get("data_jsonl")
+    if val_jsonl and os.path.exists(val_jsonl):
+        val_full = DistillationDataset(val_jsonl, temperature=temp)
+        n_val = max(1, int(len(val_full) * val_split))
+        val_loader = DataLoader(
+            Subset(val_full, list(range(n_val))),
+            batch_size=1, collate_fn=distillation_collate,
+        )
+        logger.info("[%s] Val set: %d positions from %s", run_name, n_val, val_jsonl)
+    else:
+        val_loader = None
+
     if cfg.get("online"):
         # ---- Online mode: Stockfish labeling runs in background thread ----
         # DataLoader must use num_workers=0 (Stockfish subprocess is not fork-safe).
@@ -152,15 +401,10 @@ def train_model(cfg: dict, device: torch.device) -> tuple[GATEAUChessModel, dict
             collate_fn=distillation_collate,
             num_workers=0,
         )
-        # Validation comes from a fixed JSONL (val_jsonl key, or data_jsonl fallback)
-        val_jsonl = cfg.get("val_jsonl") or cfg.get("data_jsonl")
-        val_full = DistillationDataset(val_jsonl, temperature=temp)
-        n_val = max(1, int(len(val_full) * val_split))
-        val_loader = DataLoader(
-            Subset(val_full, list(range(n_val))),
-            batch_size=1, collate_fn=distillation_collate,
-        )
-        logger.info("[%s] Val set: %d positions from %s", run_name, n_val, val_jsonl)
+    elif cfg.get("sequential"):
+        # Training data is handled inside _train_sequential; no train_loader needed here.
+        train_loader = None
+        data_size = cfg.get("total_games", 0)
     else:
         # ---- Offline mode: load pre-generated JSONL ----
         dataset = DistillationDataset(cfg["data_jsonl"], temperature=temp)
@@ -173,10 +417,11 @@ def train_model(cfg: dict, device: torch.device) -> tuple[GATEAUChessModel, dict
             Subset(dataset, indices[:split]),
             batch_size=1, collate_fn=distillation_collate, shuffle=True,
         )
-        val_loader = DataLoader(
-            Subset(dataset, indices[split:]),
-            batch_size=1, collate_fn=distillation_collate,
-        )
+        if val_loader is None:
+            val_loader = DataLoader(
+                Subset(dataset, indices[split:]),
+                batch_size=1, collate_fn=distillation_collate,
+            )
 
     model = GATEAUChessModel(
         builder.get_metadata(),
@@ -190,10 +435,17 @@ def train_model(cfg: dict, device: torch.device) -> tuple[GATEAUChessModel, dict
         run_name, cfg["hidden_channels"], cfg["num_layers"], f"{params:,}",
     )
 
+    if cfg.get("sequential"):
+        # ---- Sequential mode: full-game sequences, dual value loss ----
+        # val_loader is already constructed above from val_jsonl.
+        best_metrics, _ = _train_sequential(model, cfg, device, val_loader)
+        return model, best_metrics
+
     optimizer = torch.optim.Adam(model.parameters(), lr=lr)
     checkpoint_path = f"output/{run_name}.pt"
     best_top1 = -1.0
     best_metrics: dict = {}
+    history: list[dict] = []
 
     t_start = time.time()
     for epoch in range(epochs):
@@ -225,13 +477,20 @@ def train_model(cfg: dict, device: torch.device) -> tuple[GATEAUChessModel, dict
                 torch.nn.utils.clip_grad_norm_(model.parameters(), 1.0)
                 optimizer.step()
                 optimizer.zero_grad()
-            if step % 50 == 0 and step > 0:
-                pbar.set_postfix(loss=f"{total_loss/step:.4f}")
+            pbar.set_postfix(loss=f"{total_loss/step:.4f}")
         torch.nn.utils.clip_grad_norm_(model.parameters(), 1.0)
         optimizer.step()
         optimizer.zero_grad()
 
         m = _validate(model, val_loader, device, temp)
+        history.append({
+            "epoch": epoch + 1,
+            "loss": total_loss / max(step, 1),
+            "v_loss": total_v_loss / max(step, 1),
+            "q": total_q_loss / max(step, 1),
+            "val_top1": m["val_top1_acc"],
+            "val_top3": m["val_top3_acc"],
+        })
         logger.info(
             "[%s] Epoch %d/%d  loss=%.4f  val_top1=%.1f%%  val_top3=%.1f%%",
             run_name, epoch + 1, epochs,
@@ -265,6 +524,8 @@ def train_model(cfg: dict, device: torch.device) -> tuple[GATEAUChessModel, dict
         }
         torch.save(model.state_dict(), checkpoint_path)
 
+    plot_path = f"output/{run_name}_training.png"
+    _save_training_plot(history, plot_path)
     logger.info("[%s] Training done in %.0fs.  Best val top-1: %.1f%%",
                 run_name, best_metrics["train_time_s"], best_top1 * 100)
     # Load the best checkpoint back for evaluation

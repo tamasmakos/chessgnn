@@ -109,7 +109,7 @@ class TestGlobalNode:
 
     def test_global_node_shape(self):
         data = self.builder.fen_to_graph(STARTING_FEN)
-        assert data['global'].x.shape == (1, 9)
+        assert data['global'].x.shape == (1, 11)
 
     def test_global_node_feature_ranges(self):
         data = self.builder.fen_to_graph(STARTING_FEN)
@@ -117,7 +117,7 @@ class TestGlobalNode:
         # side_to_move is +1 or -1
         assert feat[0].item() in {1.0, -1.0}
         # all remaining features are in [0, 1]
-        for i in range(1, 9):
+        for i in range(1, 11):
             assert 0.0 <= feat[i].item() <= 1.0, f"feature {i} out of range: {feat[i].item()}"
 
     def test_global_starting_features(self):
@@ -129,6 +129,23 @@ class TestGlobalNode:
         assert feat[3].item() == 1.0   # black kingside castling
         assert feat[4].item() == 1.0   # black queenside castling
         assert feat[5].item() == 0.0   # halfmove clock = 0
+        # ELO features default to 1500/3000 = 0.5 when not provided
+        assert abs(feat[9].item() - 0.5) < 1e-5   # white_elo_norm
+        assert abs(feat[10].item() - 0.5) < 1e-5  # black_elo_norm
+
+    def test_global_elo_injection(self):
+        """ELO params are injected into global node features at indices 9 and 10."""
+        data = self.builder.fen_to_graph(STARTING_FEN, white_elo=2400, black_elo=1200)
+        feat = data['global'].x[0]
+        assert abs(feat[9].item() - 2400 / 3000) < 1e-5
+        assert abs(feat[10].item() - 1200 / 3000) < 1e-5
+
+    def test_global_elo_clamp(self):
+        """ELO values outside [0, 3000] are clamped."""
+        data = self.builder.fen_to_graph(STARTING_FEN, white_elo=9999, black_elo=-100)
+        feat = data['global'].x[0]
+        assert feat[9].item() == 1.0   # clamped at 3000
+        assert feat[10].item() == 0.0  # clamped at 0
 
     def test_global_to_piece_edges(self):
         data = self.builder.fen_to_graph(STARTING_FEN)

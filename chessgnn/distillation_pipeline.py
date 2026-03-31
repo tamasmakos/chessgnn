@@ -68,6 +68,67 @@ def sample_positions_from_pgn(
                     return
 
 
+def sample_games_from_pgn(
+    pgn_path: str,
+    max_games: int,
+    min_move: int = 5,
+    max_move: int = 120,
+) -> Iterator[dict]:
+    """Yield game dicts from *pgn_path*.
+
+    Each yielded dict has the shape::
+
+        {
+            "fens":       list[str],   # ordered FENs from min_move to end
+            "white_elo":  int,         # 1500 if header absent
+            "black_elo":  int,         # 1500 if header absent
+            "result":     str,         # "1-0" | "0-1" | "1/2-1/2" | "*"
+        }
+
+    Games with fewer than 2 qualifying positions or unknown result ("*")
+    are skipped.
+    """
+    _RESULT_MAP = {"1-0": 1.0, "0-1": -1.0, "1/2-1/2": 0.0}
+    count = 0
+    with open(pgn_path) as f:
+        while count < max_games:
+            game = chess.pgn.read_game(f)
+            if game is None:
+                break
+            result = game.headers.get("Result", "*")
+            if result not in _RESULT_MAP:
+                continue
+            try:
+                white_elo = int(game.headers.get("WhiteElo", 1500))
+            except ValueError:
+                white_elo = 1500
+            try:
+                black_elo = int(game.headers.get("BlackElo", 1500))
+            except ValueError:
+                black_elo = 1500
+
+            fens: list[str] = []
+            board = game.board()
+            for move in game.mainline_moves():
+                board.push(move)
+                if board.fullmove_number < min_move:
+                    continue
+                if board.fullmove_number > max_move:
+                    break
+                fens.append(board.fen())
+
+            if len(fens) < 2:
+                continue
+
+            yield {
+                "fens": fens,
+                "white_elo": white_elo,
+                "black_elo": black_elo,
+                "result": result,
+            }
+            count += 1
+
+
 # ---------------------------------------------------------------------------
 # Stockfish evaluator
 # ---------------------------------------------------------------------------
@@ -137,6 +198,49 @@ def evaluate_positions(
             engine.quit()
 
 
+def evaluate_positions_engine(
+    fens: Iterator[str],
+    engine: "chess.engine.SimpleEngine",
+    depth: int = 12,
+    multipv_k: int = 5,
+) -> Iterator[dict]:
+    """Like :func:`evaluate_positions` but accepts an already-open engine.
+
+    The caller is responsible for opening and closing the engine.  This
+    allows multiple games to be evaluated on the same engine instance without
+    the overhead of subprocess startup per game.
+    """
+    for fen in fens:
+        board = chess.Board(fen)
+        try:
+            infos = engine.analyse(
+                board,
+                chess.engine.Limit(depth=depth),
+                multipv=multipv_k,
+            )
+        except chess.engine.EngineTerminatedError:
+            logger.warning("Engine terminated during evaluate_positions_engine; skipping FEN")
+            continue
+
+        top_k: list[dict] = []
+        for info in infos:
+            pov_score = info["score"].relative
+            if pov_score.is_mate():
+                cp = _MATE_CP if pov_score.mate() > 0 else -_MATE_CP
+            else:
+                cp = pov_score.score()
+            wp = cp_to_winprob(cp)
+            uci_str = info.get("pv", [None])[0]
+            if uci_str is not None:
+                uci_str = uci_str.uci()
+            top_k.append({"uci": uci_str, "cp": cp, "wp": wp})
+
+        best_cp = top_k[0]["cp"] if top_k else 0
+        eval_wp = cp_to_winprob(best_cp)
+
+        yield {"fen": fen, "eval_wp": eval_wp, "top_k_moves": top_k}
+
+
 # ---------------------------------------------------------------------------
 # JSONL I/O
 # ---------------------------------------------------------------------------
@@ -160,6 +264,116 @@ def load_jsonl(path: str) -> Iterator[dict]:
             line = line.strip()
             if line:
                 yield json.loads(line)
+
+
+# ---------------------------------------------------------------------------
+# Offline game-sequence pre-generation
+# ---------------------------------------------------------------------------
+
+
+def _evaluate_game_worker(args: tuple) -> dict | None:
+    """Top-level function for ProcessPoolExecutor.
+
+    Args tuple: (game_dict, stockfish_path, depth, multipv_k)
+
+    Returns a JSONL-ready dict or None if the game should be skipped.
+    Each dict::
+
+        {
+            "fens":       [str, ...],
+            "sf_labels":  [{"eval_wp": float, "top_k_moves": [...]}, ...],
+            "white_elo":  int,
+            "black_elo":  int,
+            "result":     str,
+        }
+    """
+    game_dict, stockfish_path, depth, multipv_k = args
+    try:
+        engine = chess.engine.SimpleEngine.popen_uci(stockfish_path)
+        sf_labels: list[dict] = []
+        for rec in evaluate_positions_engine(
+            iter(game_dict["fens"]),
+            engine,
+            depth=depth,
+            multipv_k=multipv_k,
+        ):
+            sf_labels.append({"eval_wp": rec["eval_wp"], "top_k_moves": rec["top_k_moves"]})
+        engine.quit()
+    except Exception as exc:
+        logger.warning("Worker failed for a game: %s", exc)
+        return None
+
+    if len(sf_labels) < 2:
+        return None
+
+    return {
+        "fens": game_dict["fens"][:len(sf_labels)],
+        "sf_labels": sf_labels,
+        "white_elo": game_dict["white_elo"],
+        "black_elo": game_dict["black_elo"],
+        "result": game_dict["result"],
+    }
+
+
+def save_game_labels_jsonl(
+    pgn_path: str,
+    stockfish_path: str,
+    out_path: str,
+    max_games: int,
+    depth: int = 8,
+    multipv_k: int = 5,
+    num_workers: int = 4,
+    min_move: int = 5,
+    max_move: int = 120,
+) -> int:
+    """Pre-generate Stockfish labels for full game sequences → JSONL.
+
+    Each worker runs its own Stockfish process (truly parallel — no GIL on
+    subprocess I/O).  Labels are written as one JSON object per line.
+
+    Parameters
+    ----------
+    pgn_path, stockfish_path, out_path : str
+    max_games : int
+        Number of qualifying games to label.
+    depth : int
+        Stockfish search depth per position.
+    multipv_k : int
+        Number of top moves returned per position.
+    num_workers : int
+        Number of parallel Stockfish workers (ProcessPoolExecutor).
+    min_move, max_move : int
+        Move-number window; positions outside this range are skipped.
+
+    Returns
+    -------
+    int
+        Number of games written.
+    """
+    import concurrent.futures
+    from tqdm import tqdm
+
+    games = list(sample_games_from_pgn(pgn_path, max_games, min_move=min_move, max_move=max_move))
+    logger.info("Generating labels for %d games with %d workers (depth=%d)", len(games), num_workers, depth)
+
+    work_args = [(g, stockfish_path, depth, multipv_k) for g in games]
+
+    os.makedirs(os.path.dirname(out_path) or ".", exist_ok=True)
+    written = 0
+    with open(out_path, "w") as f, concurrent.futures.ProcessPoolExecutor(max_workers=num_workers) as pool:
+        for result in tqdm(
+            pool.map(_evaluate_game_worker, work_args, chunksize=1),
+            total=len(work_args),
+            desc="Labelling games",
+        ):
+            if result is not None:
+                f.write(json.dumps(result) + "\n")
+                written += 1
+
+    logger.info("Saved %d labelled games to %s", written, out_path)
+    return written
+
+
 
 
 # ---------------------------------------------------------------------------

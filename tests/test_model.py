@@ -156,6 +156,97 @@ class TestModelAPI:
     def test_has_forward_step(self, model_full):
         assert hasattr(model_full, 'forward_step')
 
+    def test_has_forward_sequence_with_q(self, model_full):
+        assert hasattr(model_full, 'forward_sequence_with_q')
+
     def test_parameter_count_nonzero(self, model_full):
         total = sum(p.numel() for p in model_full.parameters())
         assert total > 0
+
+
+# ---------------------------------------------------------------------------
+# ELO conditioning
+# ---------------------------------------------------------------------------
+
+class TestELOConditioning:
+    """ELO embedding changes value output but not Q-score ranking."""
+
+    def test_elo_changes_value(self, model_full, builder_full):
+        graph = builder_full.fen_to_graph(STARTING_FEN)
+        with torch.no_grad():
+            v_sf, _, _ = model_full.forward_with_q(graph, elo_norm=1.0)
+            v_low, _, _ = model_full.forward_with_q(graph, elo_norm=0.3)
+        # Different ELO → different value prediction
+        assert v_sf.item() != v_low.item()
+
+    def test_elo_default_is_one(self, model_full, builder_full):
+        graph = builder_full.fen_to_graph(STARTING_FEN)
+        with torch.no_grad():
+            v_default, _, _ = model_full.forward_with_q(graph)
+            v_explicit, _, _ = model_full.forward_with_q(graph, elo_norm=1.0)
+        assert v_default.item() == pytest.approx(v_explicit.item(), abs=1e-6)
+
+    def test_elo_value_in_range(self, model_full, builder_full):
+        graph = builder_full.fen_to_graph(STARTING_FEN)
+        for elo in [0.0, 0.3, 0.5, 0.8, 1.0]:
+            with torch.no_grad():
+                value, _, _ = model_full.forward_with_q(graph, elo_norm=elo)
+            assert -1.0 <= value.item() <= 1.0, f"elo_norm={elo} produced value out of [-1,1]"
+
+
+# ---------------------------------------------------------------------------
+# forward_sequence_with_q
+# ---------------------------------------------------------------------------
+
+class TestForwardSequenceWithQ:
+    """Verify sequence method chains GRU and returns correct shapes."""
+
+    def _make_sequence(self, builder_full, fens):
+        return [builder_full.fen_to_graph(f) for f in fens]
+
+    def test_values_shape(self, model_full, builder_full):
+        fens = [STARTING_FEN, CASTLING_FEN]
+        graphs = self._make_sequence(builder_full, fens)
+        with torch.no_grad():
+            values, _, _ = model_full.forward_sequence_with_q(graphs)
+        assert values.shape == (2, 1)
+
+    def test_q_scores_list_length(self, model_full, builder_full):
+        fens = [STARTING_FEN, CASTLING_FEN]
+        graphs = self._make_sequence(builder_full, fens)
+        with torch.no_grad():
+            _, q_list, _ = model_full.forward_sequence_with_q(graphs)
+        assert len(q_list) == 2
+
+    def test_q_scores_count_matches_legal_moves(self, model_full, builder_full):
+        fens = [STARTING_FEN, CASTLING_FEN]
+        graphs = self._make_sequence(builder_full, fens)
+        with torch.no_grad():
+            _, q_list, _ = model_full.forward_sequence_with_q(graphs)
+        for fen, q in zip(fens, q_list):
+            expected = len(list(chess.Board(fen).legal_moves))
+            assert q.shape == (expected,), f"q shape mismatch for {fen}"
+
+    def test_values_finite(self, model_full, builder_full):
+        fens = [STARTING_FEN, CASTLING_FEN]
+        graphs = self._make_sequence(builder_full, fens)
+        with torch.no_grad():
+            values, _, _ = model_full.forward_sequence_with_q(graphs)
+        assert torch.isfinite(values).all()
+
+    def test_sequence_differs_with_elo(self, model_full, builder_full):
+        """Values from different ELO norms should differ."""
+        fens = [STARTING_FEN, CASTLING_FEN]
+        graphs = self._make_sequence(builder_full, fens)
+        with torch.no_grad():
+            v_sf, _, _ = model_full.forward_sequence_with_q(graphs, elo_norm=1.0)
+            v_low, _, _ = model_full.forward_sequence_with_q(graphs, elo_norm=0.4)
+        assert not torch.allclose(v_sf, v_low)
+
+    def test_single_position_sequence(self, model_full, builder_full):
+        graphs = [builder_full.fen_to_graph(STARTING_FEN)]
+        with torch.no_grad():
+            values, q_list, edge_list = model_full.forward_sequence_with_q(graphs)
+        assert values.shape == (1, 1)
+        assert len(q_list) == 1
+        assert len(edge_list) == 1

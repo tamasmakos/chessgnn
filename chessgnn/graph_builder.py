@@ -20,7 +20,13 @@ class ChessGraphBuilder:
         self.use_global_node = use_global_node
         self.use_move_edges = use_move_edges
         
-    def fen_to_graph(self, fen: str, history_emb: Optional[torch.Tensor] = None) -> HeteroData:
+    def fen_to_graph(
+        self,
+        fen: str,
+        history_emb: Optional[torch.Tensor] = None,
+        white_elo: Optional[int] = None,
+        black_elo: Optional[int] = None,
+    ) -> HeteroData:
         """
         Converts a FEN string into a HeteroData object.
 
@@ -228,12 +234,16 @@ class ChessGraphBuilder:
             )
             game_phase = min(non_pawn_material / 62.0, 1.0)
 
+            elo_white = min(max(white_elo or 1500, 0), 3000) / 3000.0
+            elo_black = min(max(black_elo or 1500, 0), 3000) / 3000.0
+
             global_feat = [
                 side_to_move, castle_kside_w, castle_qside_w,
                 castle_kside_b, castle_qside_b, halfmove,
                 material_white, material_black, game_phase,
+                elo_white, elo_black,
             ]
-            data['global'].x = torch.tensor([global_feat], dtype=torch.float)  # [1, 9]
+            data['global'].x = torch.tensor([global_feat], dtype=torch.float)  # [1, 11]
 
             # global -> piece  and  piece -> global
             num_pieces = len(piece_indices)

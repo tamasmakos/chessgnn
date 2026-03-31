@@ -127,7 +127,7 @@ class WeightedHGTConv(MessagePassing):
 # ---------------------------------------------------------------------------
 # Input feature dimensions produced by ChessGraphBuilder
 # ---------------------------------------------------------------------------
-_NODE_INPUT_DIMS: dict[str, int] = {'piece': 10, 'square': 3, 'global': 9}
+_NODE_INPUT_DIMS: dict[str, int] = {'piece': 10, 'square': 3, 'global': 11}
 
 # Maximum node counts used to pre-allocate node-GRU hidden states.
 # Piece count varies per position (≤ 32); square count is always 64.
@@ -216,6 +216,14 @@ class GATEAUChessModel(nn.Module):
             for nt in node_types
         })
 
+        # ELO embedding: maps normalised scalar elo ∈ [0,1] → R^elo_dim
+        # Injected into value head and q head at inference time.
+        self._elo_dim = 16
+        self.elo_embed = nn.Sequential(
+            nn.Linear(1, self._elo_dim),
+            nn.GELU(),
+        )
+
         # GNN backbone
         self.convs = nn.ModuleList([
             WeightedHGTConv(hidden_channels, hidden_channels, metadata, heads=4)
@@ -244,17 +252,17 @@ class GATEAUChessModel(nn.Module):
         else:  # "none"
             value_in_dim = pool_dim
 
-        # Value head
+        # Value head — accepts optional ELO embedding concat
         self.value_head = nn.Sequential(
-            nn.Linear(value_in_dim, hidden_channels),
+            nn.Linear(value_in_dim + self._elo_dim, hidden_channels),
             nn.GELU(),
             nn.Linear(hidden_channels, 1),
             nn.Tanh(),
         )
 
-        # Q-head: h_piece ‖ h_square ‖ edge_attr(5) → scalar
+        # Q-head: h_piece ‖ h_square ‖ edge_attr(5) ‖ elo_embed → scalar
         self.q_head = nn.Sequential(
-            nn.Linear(hidden_channels * 2 + 5, hidden_channels),
+            nn.Linear(hidden_channels * 2 + 5 + self._elo_dim, hidden_channels),
             nn.GELU(),
             nn.Linear(hidden_channels, 1),
         )
@@ -278,6 +286,42 @@ class GATEAUChessModel(nn.Module):
             x_dict = {nt: norm_dict[nt](x) for nt, x in x_dict.items()}
 
         return x_dict
+
+    def _encode_batch(self, graphs: list) -> list[dict]:
+        """Run GNN backbone on all graphs in one fused batched pass.
+
+        All T graphs are stacked into a single ``Batch``, run through the GNN
+        layers together (GPU sees T× more nodes), then split back into
+        per-graph ``x_dict`` dicts.  This increases GPU occupancy substantially
+        compared to calling :meth:`_encode` T times in a loop.
+
+        Returns
+        -------
+        list of dict  — same length as *graphs*, each entry is the per-position
+        x_dict produced by the GNN (equivalent to calling ``_encode`` individually).
+        """
+        from torch_geometric.data import Batch
+
+        batched = Batch.from_data_list(graphs)
+
+        x_dict = {nt: self.input_proj[nt](batched.x_dict[nt]) for nt in self._node_types}
+
+        ew_dict = {}
+        edge_key = ('piece', 'interacts', 'piece')
+        if edge_key in batched.edge_attr_dict:
+            ew_dict[edge_key] = batched[edge_key].edge_attr[:, 0]
+
+        for conv, norm_dict in zip(self.convs, self.norms):
+            x_dict = conv(x_dict, batched.edge_index_dict, ew_dict)
+            x_dict = {nt: norm_dict[nt](x) for nt, x in x_dict.items()}
+
+        # Split by graph index
+        T = len(graphs)
+        result: list[dict] = []
+        batch_vecs = {nt: batched[nt].batch for nt in self._node_types}
+        for t in range(T):
+            result.append({nt: x_dict[nt][batch_vecs[nt] == t] for nt in self._node_types})
+        return result
 
     def _pool_concat(self, x_dict: dict) -> torch.Tensor:
         """Mean-pool all node types and concatenate into one vector [1, pool_dim]."""
@@ -347,15 +391,26 @@ class GATEAUChessModel(nn.Module):
         feat = self._pool_concat(x_dict_updated)       # [1, pool_dim]
         return feat, new_cache
 
-    def _pool_value(self, feat: torch.Tensor) -> torch.Tensor:
-        """Pass a pre-pooled feature through the value head → [1, 1]."""
-        return self.value_head(feat)
+    def _pool_value(self, feat: torch.Tensor, elo_norm: float = 1.0) -> torch.Tensor:
+        """Pass a pre-pooled feature through the value head → [1, 1].
+
+        Parameters
+        ----------
+        elo_norm : float
+            Normalised ELO in [0, 1].  1.0 = perfect play (Stockfish / 3000).  
+            0.5 ≈ 1500 Elo.  Passed through ``elo_embed`` and concatenated to
+            ``feat`` before the value MLP.
+        """
+        device = feat.device
+        elo_t = torch.tensor([[elo_norm]], dtype=torch.float32, device=device)  # [1, 1]
+        elo_e = self.elo_embed(elo_t)                                            # [1, elo_dim]
+        return self.value_head(torch.cat([feat, elo_e], dim=1))
 
     # ------------------------------------------------------------------
     # Public API — single position
     # ------------------------------------------------------------------
 
-    def forward(self, graph, cache: KVCache | None = None) -> torch.Tensor:
+    def forward(self, graph, cache: KVCache | None = None, elo_norm: float = 1.0) -> torch.Tensor:
         """
         Returns value V(s) as a [1, 1] tensor in [-1, 1].
 
@@ -365,12 +420,13 @@ class GATEAUChessModel(nn.Module):
         """
         x_dict = self._encode(graph)
         feat, _ = self._apply_temporal(x_dict, cache)
-        return self._pool_value(feat)
+        return self._pool_value(feat, elo_norm)
 
     def forward_step(
         self,
         graph,
         cache: KVCache | None = None,
+        elo_norm: float = 1.0,
     ) -> tuple[torch.Tensor, KVCache]:
         """
         Single-step inference returning value and the updated cache.
@@ -381,6 +437,8 @@ class GATEAUChessModel(nn.Module):
             Current board position graph.
         cache : KVCache, optional
             Hidden state from the previous move. Pass ``None`` at game start.
+        elo_norm : float
+            Normalised ELO in [0, 1].  1.0 = perfect play.  0.5 ≈ 1500 Elo.
 
         Returns
         -------
@@ -391,16 +449,26 @@ class GATEAUChessModel(nn.Module):
         """
         x_dict = self._encode(graph)
         feat, new_cache = self._apply_temporal(x_dict, cache)
-        value = self._pool_value(feat)
+        value = self._pool_value(feat, elo_norm)
         return value, new_cache
 
     def forward_with_q(
         self,
         graph,
         cache: KVCache | None = None,
-    ) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor]:
+        elo_norm: float = 1.0,
+        return_cache: bool = False,
+    ) -> tuple:
         """
         Single-pass inference returning value and per-move Q scores.
+
+        Parameters
+        ----------
+        return_cache : bool
+            When True, a fourth element ``KVCache`` is appended to the return
+            tuple so callers can thread temporal state through a game
+            (e.g. :meth:`CaseTutor.analyse_game`).  Default False preserves
+            the existing 3-tuple interface for all current callers.
 
         Returns
         -------
@@ -411,20 +479,28 @@ class GATEAUChessModel(nn.Module):
         move_edge_index : Tensor [2, M]
             Edge index (piece_src, square_dst) for each move, matching
             the order of board.legal_moves used by ChessGraphBuilder.
+        new_cache : KVCache  (only when return_cache=True)
         """
         x_dict = self._encode(graph)
-        feat, _ = self._apply_temporal(x_dict, cache)
-        value = self._pool_value(feat)
+        feat, new_cache = self._apply_temporal(x_dict, cache)
+        value = self._pool_value(feat, elo_norm)
 
         move_edge_index = graph['piece', 'move', 'square'].edge_index  # [2, M]
         move_edge_attr = graph['piece', 'move', 'square'].edge_attr    # [M, 5]
 
+        device = feat.device
+        elo_t = torch.tensor([[elo_norm]], dtype=torch.float32, device=device)
+        elo_e = self.elo_embed(elo_t)                                   # [1, elo_dim]
+        elo_expand = elo_e.expand(move_edge_index.shape[1], -1)        # [M, elo_dim]
+
         src_idx, dst_idx = move_edge_index
         h_src = x_dict['piece'][src_idx]   # [M, H]
         h_dst = x_dict['square'][dst_idx]  # [M, H]
-        q_feats = torch.cat([h_src, h_dst, move_edge_attr], dim=1)  # [M, 2H+5]
-        q_scores = self.q_head(q_feats).squeeze(-1)                  # [M]
+        q_feats = torch.cat([h_src, h_dst, move_edge_attr, elo_expand], dim=1)  # [M, 2H+5+elo_dim]
+        q_scores = self.q_head(q_feats).squeeze(-1)                             # [M]
 
+        if return_cache:
+            return value, q_scores, move_edge_index, new_cache
         return value, q_scores, move_edge_index
 
     # ------------------------------------------------------------------
@@ -434,6 +510,7 @@ class GATEAUChessModel(nn.Module):
     def forward_sequence(
         self,
         graphs: list,
+        elo_norm: float = 1.0,
     ) -> torch.Tensor:
         """
         Process a sequence of positions and return value predictions for
@@ -443,6 +520,8 @@ class GATEAUChessModel(nn.Module):
         ----------
         graphs : list of HeteroData
             Ordered list of board positions (moves 0 … T-1).
+        elo_norm : float
+            Normalised ELO in [0, 1] shared across the whole game sequence.
 
         Returns
         -------
@@ -454,5 +533,145 @@ class GATEAUChessModel(nn.Module):
         for graph in graphs:
             x_dict = self._encode(graph)
             feat, cache = self._apply_temporal(x_dict, cache)
-            values.append(self._pool_value(feat))
+            values.append(self._pool_value(feat, elo_norm))
         return torch.cat(values, dim=0)  # [T, 1]
+
+    def forward_sequence_with_q(
+        self,
+        graphs: list,
+        elo_norm: float = 1.0,
+    ) -> tuple[torch.Tensor, list[torch.Tensor], list[torch.Tensor]]:
+        """
+        Process a full game sequence, returning value + Q scores at every step.
+
+        The GRU hidden state is chained across all positions so the model
+        accumulates temporal context (piece stability, threat evolution, etc.).
+
+        Parameters
+        ----------
+        graphs : list of HeteroData
+            Ordered board positions from a single game (e.g. moves 10 … N).
+        elo_norm : float
+            Normalised ELO in [0, 1] shared across the game.
+
+        Returns
+        -------
+        values : Tensor [T, 1]
+            Value at each position in the sequence.
+        q_scores_list : list of Tensor [M_t]
+            Per-move Q logits at each step t; M_t may differ (captures change
+            the number of legal moves).
+        move_edge_indices : list of Tensor [2, M_t]
+            Move edge indices at each step, matching board.legal_moves order.
+        """
+        values: list[torch.Tensor] = []
+        q_scores_list: list[torch.Tensor] = []
+        move_edge_indices: list[torch.Tensor] = []
+
+        device = next(self.parameters()).device
+        elo_t = torch.tensor([[elo_norm]], dtype=torch.float32, device=device)
+        elo_e = self.elo_embed(elo_t)  # [1, elo_dim]; computed once per game
+
+        cache: KVCache | None = None
+        for graph in graphs:
+            x_dict = self._encode(graph)
+            feat, cache = self._apply_temporal(x_dict, cache)
+            values.append(self._pool_value(feat, elo_norm))
+
+            move_edge_index = graph['piece', 'move', 'square'].edge_index  # [2, M]
+            move_edge_attr = graph['piece', 'move', 'square'].edge_attr    # [M, 5]
+            m = move_edge_index.shape[1]
+
+            if m > 0:
+                elo_expand = elo_e.expand(m, -1)                          # [M, elo_dim]
+                src_idx, dst_idx = move_edge_index
+                h_src = x_dict['piece'][src_idx]                          # [M, H]
+                h_dst = x_dict['square'][dst_idx]                        # [M, H]
+                q_feats = torch.cat([h_src, h_dst, move_edge_attr, elo_expand], dim=1)
+                q_scores = self.q_head(q_feats).squeeze(-1)               # [M]
+            else:
+                q_scores = torch.empty(0, device=device)
+
+            q_scores_list.append(q_scores)
+            move_edge_indices.append(move_edge_index)
+
+        return torch.cat(values, dim=0), q_scores_list, move_edge_indices
+
+    def forward_sequence_with_q_dual(
+        self,
+        graphs: list,
+        elo_norm_sf: float = 1.0,
+        elo_norm_player: float = 1.0,
+    ) -> tuple[torch.Tensor, torch.Tensor, list[torch.Tensor], list[torch.Tensor]]:
+        """Like :meth:`forward_sequence_with_q` but decodes **two** value tensors
+        in a single GNN backbone pass.
+
+        The GNN + GRU chain runs once per position.  After accumulating all
+        temporal features the value head is applied twice with different ELO
+        embeddings.  This halves backbone compute for the dual-target training
+        objective compared to calling :meth:`forward_sequence_with_q` twice.
+
+        Parameters
+        ----------
+        graphs : list of HeteroData
+        elo_norm_sf : float
+            ELO for the Stockfish-perspective value (default 1.0).
+        elo_norm_player : float
+            ELO for the player-outcome value.
+
+        Returns
+        -------
+        values_sf : Tensor [T, 1]
+        values_player : Tensor [T, 1]
+        q_scores_list : list of Tensor [M_t]  (uses elo_norm_sf for Q)
+        move_edge_indices : list of Tensor [2, M_t]
+        """
+        device = next(self.parameters()).device
+
+        elo_t_sf = torch.tensor([[elo_norm_sf]], dtype=torch.float32, device=device)
+        elo_e_sf = self.elo_embed(elo_t_sf)          # [1, elo_dim]
+
+        elo_t_pl = torch.tensor([[elo_norm_player]], dtype=torch.float32, device=device)
+        elo_e_pl = self.elo_embed(elo_t_pl)          # [1, elo_dim]
+
+        vals_sf: list[torch.Tensor] = []
+        vals_pl: list[torch.Tensor] = []
+        q_scores_list: list[torch.Tensor] = []
+        move_edge_indices: list[torch.Tensor] = []
+
+        # Batch-encode all T positions through the GNN in one fused pass.
+        # The GRU still runs sequentially (temporal dependency), but the
+        # expensive HGT convolutions now see T× more nodes on the GPU.
+        all_x_dicts = self._encode_batch(graphs)
+
+        cache: KVCache | None = None
+        for t, (graph, x_dict) in enumerate(zip(graphs, all_x_dicts)):
+            feat, cache = self._apply_temporal(x_dict, cache)
+
+            # Value head: two ELO conditions, one backbone
+            vals_sf.append(self.value_head(torch.cat([feat, elo_e_sf], dim=1)))
+            vals_pl.append(self.value_head(torch.cat([feat, elo_e_pl], dim=1)))
+
+            move_edge_index = graph['piece', 'move', 'square'].edge_index
+            move_edge_attr = graph['piece', 'move', 'square'].edge_attr
+            m = move_edge_index.shape[1]
+
+            if m > 0:
+                elo_expand = elo_e_sf.expand(m, -1)
+                src_idx, dst_idx = move_edge_index
+                h_src = x_dict['piece'][src_idx]
+                h_dst = x_dict['square'][dst_idx]
+                q_feats = torch.cat([h_src, h_dst, move_edge_attr, elo_expand], dim=1)
+                q_scores = self.q_head(q_feats).squeeze(-1)
+            else:
+                q_scores = torch.empty(0, device=device)
+
+            q_scores_list.append(q_scores)
+            move_edge_indices.append(move_edge_index)
+
+        return (
+            torch.cat(vals_sf, dim=0),
+            torch.cat(vals_pl, dim=0),
+            q_scores_list,
+            move_edge_indices,
+        )
