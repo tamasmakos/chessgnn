@@ -26,6 +26,7 @@ from chessgnn.calibration import TemperatureScaler
 from chessgnn.graph_builder import ChessGraphBuilder
 from chessgnn.lichess_api import read_lichess_game
 from chessgnn.model import GATEAUChessModel
+from chessgnn.theoretical import analyze_theoretical
 from tutor import CaseTutor
 
 # ---------------------------------------------------------------------------
@@ -161,6 +162,7 @@ def print_report(
     elo_black_result: dict,
     fens: list[str],
     ucis: list[str],
+    theoretical: dict | None = None,
 ) -> None:
     w_name  = game.headers.get("White", "White")
     b_name  = game.headers.get("Black", "Black")
@@ -264,6 +266,29 @@ def print_report(
     print()
     print("  Rank: move rank vs all legal moves. Pct: fraction of moves beaten (higher = better).")
     print("  Drop: win-prob change from the mover's perspective (positive = advantage lost).")
+
+    # -----------------------------------------------------------------------
+    # Theoretical Profile
+    # -----------------------------------------------------------------------
+    if theoretical:
+        print()
+        print("─" * 60)
+        print("  THEORETICAL PROFILE (Non-Engine Heuristics)")
+        print()
+        w_scope = theoretical["w_avg_scope"]
+        b_scope = theoretical["b_avg_scope"]
+        print(f"  Avg Piece Scope Efficiency: ⬜ {w_scope:.1%}  vs  ⬛ {b_scope:.1%}")
+        
+        w_cen = theoretical["w_avg_center"]
+        b_cen = theoretical["b_avg_center"]
+        print(f"  Avg Central Dominance Pts : ⬜ {w_cen:.1f}  vs  ⬛ {b_cen:.1f}")
+        
+        print(f"  Max Outposts Established  : ⬜ {theoretical['w_outposts_max']}  vs  ⬛ {theoretical['b_outposts_max']}")
+        
+        ws = theoretical["w_struct"]
+        bs = theoretical["b_struct"]
+        print(f"  Final Pawn Structure      : ⬜ {ws['doubled']} doubled, {ws['isolated']} isolated")
+        print(f"                              ⬛ {bs['doubled']} doubled, {bs['isolated']} isolated")
 
     # -----------------------------------------------------------------------
     # Game character & territory
@@ -395,7 +420,9 @@ def main() -> None:
     elo_white_result = tutor.estimate_elo(stats, "white")
     elo_black_result = tutor.estimate_elo(stats, "black")
 
-    print_report(game, stats, elo_white_result, elo_black_result, fens, ucis)
+    theoretical = analyze_theoretical(fens)
+
+    print_report(game, stats, elo_white_result, elo_black_result, fens, ucis, theoretical)
 
 
 if __name__ == "__main__":
