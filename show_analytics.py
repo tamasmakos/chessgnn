@@ -15,6 +15,7 @@ Default game:       1  (BFG9k vs mamalak, French Defence, 12 moves)
 
 import argparse
 import io
+import os
 import sys
 
 import chess
@@ -365,7 +366,6 @@ def _parse_args() -> argparse.Namespace:
 def main() -> None:
     args = _parse_args()
     device = torch.device(args.device)
-    import os
 
     print(f"\nLoading model from {args.model} …", flush=True)
     model = _load_model(args.model, device)
