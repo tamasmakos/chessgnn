@@ -257,6 +257,18 @@ best_move, win_prob, ranking, uncertainty = tutor.recommend_move(current_fen)
 print(f"Recommended: {best_move}  Win probability: {win_prob:.1%}  Uncertainty: {uncertainty:.2f}")
 ```
 
+### Analytics from a Lichess game
+
+You can analyse a public Lichess game directly without downloading a PGN first:
+
+```bash
+python show_analytics.py --model output/gateau_distilled.pt --lichess-game https://lichess.org/j1dkb5dw
+```
+
+If you need authenticated access (for example private games available to your
+account), export a token in `LICHESS_API_TOKEN` first and `show_analytics.py`
+will attach it automatically when calling the Lichess API.
+
 ### Evaluation Harness
 
 Evaluate a trained model across three metrics using `chessgnn/eval.py`:
@@ -421,4 +433,3 @@ stockfish/src/stockfish   # Bundled Stockfish binary (Linux)
 ## License
 
 See individual file headers. Stockfish is bundled under the GPL v3 (see `stockfish/Copying.txt`).
-
