@@ -3,10 +3,11 @@
 Usage
 -----
     python show_analytics.py [--model PATH] [--game N]
+    python show_analytics.py [--model PATH] --lichess-game GAME_ID_OR_URL
 
 Loads the best available checkpoint, parses game N (1-indexed) from the
-lichess PGN, runs full post-game analysis and prints a structured coaching
-report to stdout.
+lichess PGN (or fetches a game directly from Lichess), runs full post-game
+analysis and prints a structured coaching report to stdout.
 
 Default checkpoint: output/gateau_sequential_h128_l4.pt
 Default game:       1  (BFG9k vs mamalak, French Defence, 12 moves)
@@ -22,6 +23,7 @@ import torch
 
 from chessgnn.calibration import TemperatureScaler
 from chessgnn.graph_builder import ChessGraphBuilder
+from chessgnn.lichess_api import read_lichess_game
 from chessgnn.model import GATEAUChessModel
 from tutor import CaseTutor
 
@@ -352,6 +354,10 @@ def _parse_args() -> argparse.Namespace:
                    help="Path to PGN file (default: %(default)s)")
     p.add_argument("--game",   type=int, default=1, metavar="N",
                    help="1-indexed game number in the PGN (default: 1)")
+    p.add_argument("--lichess-game",
+                   help="Lichess game id or URL to fetch via the API")
+    p.add_argument("--lichess-token-env", default="LICHESS_API_TOKEN",
+                   help="Environment variable holding an optional Lichess API token")
     p.add_argument("--device", default="cpu")
     return p.parse_args()
 
@@ -359,21 +365,26 @@ def _parse_args() -> argparse.Namespace:
 def main() -> None:
     args = _parse_args()
     device = torch.device(args.device)
+    import os
 
     print(f"\nLoading model from {args.model} …", flush=True)
     model = _load_model(args.model, device)
 
     tutor = CaseTutor(model, device)
     if args.calib:
-        import os
         if os.path.isfile(args.calib):
             scaler = TemperatureScaler()
             scaler.load(args.calib)
             tutor.set_calibration(scaler)
             print(f"Calibration loaded (T={scaler.T:.4f})", flush=True)
 
-    print(f"Parsing game {args.game} from {args.pgn} …", flush=True)
-    game = _read_nth_game(args.pgn, args.game)
+    if args.lichess_game:
+        token = os.getenv(args.lichess_token_env) or None
+        print(f"Fetching Lichess game {args.lichess_game} …", flush=True)
+        game = read_lichess_game(args.lichess_game, token=token)
+    else:
+        print(f"Parsing game {args.game} from {args.pgn} …", flush=True)
+        game = _read_nth_game(args.pgn, args.game)
     fens, ucis = _extract_fens_ucis(game)
     elo_w = int(game.headers.get("WhiteElo", 1500) or 1500)
     elo_b = int(game.headers.get("BlackElo", 1500) or 1500)
