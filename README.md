@@ -10,7 +10,37 @@ The answer so far: yes, with distillation from Stockfish and the architecture de
 
 ## How It Works
 
-### 1. Position as a Graph
+The architecture is divided into two distinct phases: **Structural (Spatial) Reasoning** to understand the board in a single moment, followed by **Sequential (Temporal) Context** to understand how threats and dynamics evolve across moves.
+
+```mermaid
+graph TD
+    FEN[FEN String] -->|Graph Builder| Graph[Heterogeneous Graph\nPieces & Squares]
+    
+    subgraph Structural [1. Structural Spatial Reasoning]
+        Graph --> HGT1[Weighted HGT Layer 1]
+        HGT1 --> HGT2[Weighted HGT Layer 2]
+        HGT2 --> HGT3[Weighted HGT Layer 3]
+        HGT3 --> HGT4[Weighted HGT Layer 4]
+    end
+
+    subgraph Sequential [2. Sequential Temporal Context]
+        HGT4 -->|Node Embeddings| GRU[GRU / Node-GRU Cell]
+        Cache[(KV Cache\nPrevious States)] --> GRU
+        GRU -->|Updates| Cache
+    end
+
+    subgraph Output [3. Output Heads]
+        GRU --> Pool[Pooling]
+        Pool -->|Elo Embedding| ValueHead[Value Head V(s)]
+        
+        GRU -->|Move Edges + Elo| QHead[Q-Head Q(s,a)]
+    end
+    
+    ValueHead --> WinProb[Win Probability]
+    QHead --> MoveLogits[Move Logits & Ranking]
+```
+
+### 1. Structural Phase: Position as a Graph
 
 Every chess position is converted to a `HeteroData` graph by `ChessGraphBuilder.fen_to_graph()`:
 
@@ -28,7 +58,7 @@ Every chess position is converted to a `HeteroData` graph by `ChessGraphBuilder.
 | `(square, adjacent, square)` | Chebyshev-1 king-move adjacency |
 | `(piece, move, square)` | one edge per legal move (used by Q-head) |
 
-### 2. Spatial Reasoning — Weighted HGT
+### 2. Structural Phase: Spatial Reasoning — Weighted HGT
 
 `GATEAUChessModel` stacks `WeightedHGTConv` layers (default: 4). Each layer uses separate key/query/value projections per node type and separate relation matrices per edge type. Edge weights fold into attention multiplicatively:
 
@@ -36,7 +66,7 @@ $$\alpha = \mathrm{softmax}\!\left(\frac{(h_i W_K)(h_j W_Q)^\top}{\sqrt{d}}\righ
 
 LayerNorm is applied after each convolution. Layer 1 captures direct attacks and defenses. Layer 2 captures secondary support chains. Layer 3+ captures complex tactics — pins, batteries, discovered attacks.
 
-### 3. Temporal Context — Three Modes
+### 3. Sequential Phase: Temporal Context — Three Modes
 
 `GATEAUChessModel` supports three temporal modes, selectable via `temporal_mode`:
 
