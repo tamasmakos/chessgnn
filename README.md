@@ -1,4 +1,9 @@
 # ChessGNN — Searchless Chess Engine via Spatio-Temporal Heterogeneous GNN
+> **The Broken Mirror Thesis: Graph-Native Intelligence**
+> Modern chess analytics is trapped in a representational error. By treating Stockfish’s scalar evaluations as the ultimate ground truth, the industry has built an ecosystem that fails to capture the structural and relational reality of human chess cognition. 
+> 
+> *ChessGNN* is built on a fundamentally different ontology: **Graph-Native Intelligence**. Instead of brute-forcing millions of move sequences via alpha-beta search, we encode chess as it is actually perceived by human experts—as a temporal sequence of graph transformations. Pieces are nodes; attacks, defenses, and structural interactions are directed, weighted edges. By aligning our model's inductive bias (Heterogeneous Graph Transformers) with the relational reality of the board, ChessGNN moves beyond mere centipawn scores. It lays the architectural groundwork for quantifying *practical difficulty*, performing *structural fingerprinting*, and achieving powerful searchless inference in a single forward pass.
+
 
 A graph neural network that encodes chess positions as typed relational graphs and ranks legal moves by win probability **in a single forward pass** — no search tree required.
 
