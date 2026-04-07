@@ -341,6 +341,18 @@ class TestEvaluateHumanMovePrediction:
         os.unlink(tf.name)
         assert result["top3_acc"] >= result["top1_acc"]
 
+    def test_max_positions_limits_work_done(self, evaluator, monkeypatch):
+        monkeypatch.setattr(
+            evaluator,
+            "_pick_topk_moves_uci",
+            lambda fen, k=3: ["e2e4", "d2d4", "g1f3"] if fen == STARTING_FEN else ["e7e5", "c7c5", "d7d5"],
+        )
+        with tempfile.NamedTemporaryFile(mode="w", suffix=".jsonl", delete=False) as tf:
+            _write_sample_games_jsonl(tf.name)
+            result = evaluator.evaluate_human_move_prediction(tf.name, k=3, max_positions=1)
+        os.unlink(tf.name)
+        assert result["count"] == 1
+
 
 # ---------------------------------------------------------------------------
 # evaluate_value_correlation

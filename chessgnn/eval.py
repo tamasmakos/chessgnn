@@ -29,6 +29,7 @@ import numpy as np
 import torch
 
 from .calibration import TemperatureScaler
+from .distillation_dataset import infer_played_move_uci
 from .distillation_pipeline import load_jsonl
 from .graph_builder import ChessGraphBuilder
 
@@ -163,10 +164,15 @@ class Evaluator:
 
     def _pick_best_move_uci(self, fen: str) -> str | None:
         """Return the UCI string of the model's top-1 move, or None."""
+        topk = self._pick_topk_moves_uci(fen, k=1)
+        return topk[0] if topk else None
+
+    def _pick_topk_moves_uci(self, fen: str, k: int = 3) -> list[str]:
+        """Return up to k model-ranked legal moves for a position."""
         board = chess.Board(fen)
         legal_moves = list(board.legal_moves)
         if not legal_moves:
-            return None
+            return []
 
         graph = self.builder.fen_to_graph(fen).to(self.device)
 
@@ -175,29 +181,23 @@ class Evaluator:
                 _, q_scores, _ = self.model.forward_with_q(graph)
                 q_list = q_scores.cpu().tolist()
                 if len(q_list) != len(legal_moves):
-                    return None
-                # Q is trained from side-to-move perspective; argmax = best move.
-                best_idx = int(q_scores.argmax().item())
-                return legal_moves[best_idx].uci()
+                    return []
+                topk_idx = q_scores.topk(min(k, len(q_scores))).indices.tolist()
+                return [legal_moves[idx].uci() for idx in topk_idx]
 
             # --- rollout path (STHGATLikeModel) ---
             is_white = board.turn == chess.WHITE
-            best_val: float | None = None
-            best_uci: str | None = None
+            scored_moves: list[tuple[float, str]] = []
             for move in legal_moves:
                 board.push(move)
                 g = self.builder.fen_to_graph(board.fen()).to(self.device)
                 step_out, _ = self.model.forward_step(g)
                 scalar = _extract_scalar(step_out)
                 board.pop()
-                if (
-                    best_val is None
-                    or (is_white and scalar > best_val)
-                    or (not is_white and scalar < best_val)
-                ):
-                    best_val = scalar
-                    best_uci = move.uci()
-            return best_uci
+                score = scalar if is_white else -scalar
+                scored_moves.append((score, move.uci()))
+            scored_moves.sort(key=lambda item: item[0], reverse=True)
+            return [uci for _, uci in scored_moves[:k]]
 
     # ------------------------------------------------------------------
     # Internal: value prediction for a single position
@@ -277,6 +277,57 @@ class Evaluator:
         }
         logger.info(
             "Engine agreement — top1: %.3f  top%d: %.3f  (n=%d)",
+            result["top1_acc"],
+            k,
+            result[f"top{k}_acc"],
+            count,
+        )
+        return result
+
+    def evaluate_human_move_prediction(
+        self,
+        games_jsonl: str,
+        k: int = 3,
+        max_games: int = 0,
+        max_positions: int = 0,
+    ) -> dict[str, float]:
+        """Measure whether the model predicts the move actually played by humans."""
+        top1_correct = 0
+        topk_correct = 0
+        count = 0
+
+        games_seen = 0
+        for rec in load_jsonl(games_jsonl):
+            if max_games > 0 and games_seen >= max_games:
+                break
+            fens: list[str] = rec.get("fens", [])
+            for idx in range(len(fens) - 1):
+                if max_positions > 0 and count >= max_positions:
+                    break
+                fen = fens[idx]
+                played_uci = infer_played_move_uci(fen, fens[idx + 1])
+                if played_uci is None:
+                    continue
+                predicted = self._pick_topk_moves_uci(fen, k=k)
+                if not predicted:
+                    continue
+                if predicted[0] == played_uci:
+                    top1_correct += 1
+                if played_uci in predicted:
+                    topk_correct += 1
+                count += 1
+            games_seen += 1
+            if max_positions > 0 and count >= max_positions:
+                break
+
+        n = max(count, 1)
+        result = {
+            "top1_acc": top1_correct / n,
+            f"top{k}_acc": topk_correct / n,
+            "count": count,
+        }
+        logger.info(
+            "Human move prediction — top1: %.3f  top%d: %.3f  (n=%d)",
             result["top1_acc"],
             k,
             result[f"top{k}_acc"],

@@ -31,12 +31,14 @@ class ChessGraphBuilder:
         Converts a FEN string into a HeteroData object.
 
         Nodes (always present):
-            - piece:  [type_onehot(6), color, value, file, rank]  (10-dim)
+            - piece:  [type_onehot(6), color, value, file, rank,
+                       attack_out, defense_out, attacked_by,
+                       defended_by, ray_degree]                    (15-dim)
             - square: [file/7, rank/7, is_occupied]               (3-dim)
         Nodes (optional):
             - global: [side_to_move, castle_kside_w, castle_qside_w, castle_kside_b,
                        castle_qside_b, halfmove_clock/100, material_w/39, material_b/39,
-                       game_phase]                                 (9-dim, if use_global_node)
+                       game_phase, white_elo/3000, black_elo/3000] (11-dim, if use_global_node)
 
         Edges (always present):
             - (piece, on, square):              location
@@ -61,6 +63,7 @@ class ChessGraphBuilder:
         # 1. Nodes Construction
         pieces = []
         piece_indices = {} # map square -> piece_idx
+        piece_squares = []
         
         squares = []
         square_indices = {sq: i for i, sq in enumerate(SQUARES)}
@@ -97,12 +100,42 @@ class ChessGraphBuilder:
                 feat = type_vec + [color, val, file/7.0, rank/7.0]
                 pieces.append(feat)
                 piece_indices[sq] = current_piece_idx
+                piece_squares.append(sq)
                 current_piece_idx += 1
 
         if pieces:
-            data['piece'].x = torch.tensor(pieces, dtype=torch.float)
+            piece_features = []
+            for sq, base_feat in zip(piece_squares, pieces):
+                piece = board.piece_at(sq)
+                attack_out = sum(
+                    1
+                    for dst in board.attacks(sq)
+                    if board.piece_at(dst) and board.piece_at(dst).color != piece.color
+                )
+                defense_out = sum(
+                    1
+                    for dst in board.attacks(sq)
+                    if board.piece_at(dst) and board.piece_at(dst).color == piece.color
+                )
+                attacked_by = len(board.attackers(not piece.color, sq))
+                defended_by = len(board.attackers(piece.color, sq))
+                ray_degree = sum(
+                    1 for other_sq in piece_squares
+                    if other_sq != sq and self.is_aligned(sq, other_sq)
+                )
+
+                structural = [
+                    min(attack_out / 8.0, 1.0),
+                    min(defense_out / 8.0, 1.0),
+                    min(attacked_by / 8.0, 1.0),
+                    min(defended_by / 8.0, 1.0),
+                    min(ray_degree / 8.0, 1.0),
+                ]
+                piece_features.append(base_feat + structural)
+
+            data['piece'].x = torch.tensor(piece_features, dtype=torch.float)
         else:
-            data['piece'].x = torch.empty((0, 10), dtype=torch.float)
+            data['piece'].x = torch.empty((0, 15), dtype=torch.float)
 
         # 2. Edges Construction
         

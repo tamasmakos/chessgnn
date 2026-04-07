@@ -21,6 +21,7 @@ Typical usage (inside run_experiment.py or a custom training script)::
         ...  # train as normal
 """
 
+import json
 import logging
 import math
 import queue
@@ -30,7 +31,11 @@ from typing import Iterator
 import torch
 from torch.utils.data import IterableDataset
 
-from .distillation_dataset import soft_policy_target
+from .distillation_dataset import (
+    hard_policy_target,
+    infer_played_move_uci,
+    soft_policy_target,
+)
 from .distillation_pipeline import (
     evaluate_positions,
     evaluate_positions_engine,
@@ -200,6 +205,7 @@ class GameSequenceDataset(IterableDataset):
             "value_targets_sf":      Tensor[T],         # Stockfish eval (side-to-move WP → [-1,1])
             "value_targets_outcome": Tensor[T],         # game result (+1/-1/0) repeated T times
             "policy_targets":        list[Tensor[M_t]], # per-position soft policy
+            "human_policy_targets":  list[Tensor[M_t]], # played human move target
             "elo_norm":              float,             # avg(white_elo, black_elo) / 3000
             "result_value":          float,             # +1.0 / -1.0 / 0.0
         }
@@ -286,12 +292,14 @@ class GameSequenceDataset(IterableDataset):
             graphs: list = []
             sf_targets: list[float] = []
             policy_targets: list[torch.Tensor] = []
-            for label in evaluate_positions_engine(
+            human_policy_targets: list[torch.Tensor] = []
+            labels = list(evaluate_positions_engine(
                 iter(fens),
                 engine,
                 depth=self.depth,
                 multipv_k=self.multipv_k,
-            ):
+            ))
+            for idx, label in enumerate(labels):
                 fen = label["fen"]
                 try:
                     g = w_builder.fen_to_graph(fen, white_elo=white_elo, black_elo=black_elo)
@@ -309,9 +317,16 @@ class GameSequenceDataset(IterableDataset):
                     num_legal,
                     temperature=self.temperature,
                 )
+                next_fen = labels[idx + 1]["fen"] if idx + 1 < len(labels) else None
+                human_pol = hard_policy_target(
+                    infer_played_move_uci(fen, next_fen) if next_fen is not None else None,
+                    fen,
+                    num_legal,
+                )
                 graphs.append(g)
                 sf_targets.append(2.0 * label["eval_wp"] - 1.0)
                 policy_targets.append(pol)
+                human_policy_targets.append(human_pol)
 
             if len(graphs) < 2:
                 return
@@ -323,6 +338,7 @@ class GameSequenceDataset(IterableDataset):
                     (len(graphs),), result_value, dtype=torch.float32
                 ),
                 "policy_targets": policy_targets,
+                "human_policy_targets": human_policy_targets,
                 "elo_norm": elo_norm,
                 "result_value": result_value,
             })
@@ -389,12 +405,25 @@ class GameSequenceOfflineDataset(IterableDataset):
         self,
         jsonl_path: str,
         temperature: float = 1.0,
+        elo_min: int = 0,
+        elo_max: int = 9999,
     ) -> None:
         self.jsonl_path = jsonl_path
         self.temperature = temperature
-        # Count lines once for __len__
+        self.elo_min = elo_min
+        self.elo_max = elo_max
+        # Count only records inside the active ELO range.
         with open(jsonl_path) as f:
-            self._len = sum(1 for line in f if line.strip())
+            self._len = 0
+            for line in f:
+                if not line.strip():
+                    continue
+                rec = json.loads(line)
+                white_elo = int(rec.get("white_elo", 1500))
+                black_elo = int(rec.get("black_elo", 1500))
+                avg_elo = (white_elo + black_elo) / 2.0
+                if self.elo_min <= avg_elo <= self.elo_max:
+                    self._len += 1
 
     def __iter__(self) -> Iterator[dict]:
         worker_info = torch.utils.data.get_worker_info()
@@ -410,15 +439,19 @@ class GameSequenceOfflineDataset(IterableDataset):
             sf_labels: list[dict] = rec["sf_labels"]
             white_elo: int = rec.get("white_elo", 1500)
             black_elo: int = rec.get("black_elo", 1500)
+            avg_elo = (white_elo + black_elo) / 2.0
+            if avg_elo < self.elo_min or avg_elo > self.elo_max:
+                continue
             result: str = rec.get("result", "1/2-1/2")
             result_value: float = self._RESULT_VALUE.get(result, 0.0)
-            elo_norm = min((white_elo + black_elo) / 2.0 / 3000.0, 1.0)
+            elo_norm = min(avg_elo / 3000.0, 1.0)
 
             graphs: list = []
             sf_targets: list[float] = []
             policy_targets: list[torch.Tensor] = []
+            human_policy_targets: list[torch.Tensor] = []
 
-            for fen, label in zip(fens, sf_labels):
+            for idx, (fen, label) in enumerate(zip(fens, sf_labels)):
                 try:
                     g = builder.fen_to_graph(fen, white_elo=white_elo, black_elo=black_elo)
                 except Exception:
@@ -432,9 +465,16 @@ class GameSequenceOfflineDataset(IterableDataset):
                     num_legal,
                     temperature=self.temperature,
                 )
+                next_fen = fens[idx + 1] if idx + 1 < len(fens) else None
+                human_pol = hard_policy_target(
+                    infer_played_move_uci(fen, next_fen) if next_fen is not None else None,
+                    fen,
+                    num_legal,
+                )
                 graphs.append(g)
                 sf_targets.append(2.0 * label["eval_wp"] - 1.0)
                 policy_targets.append(pol)
+                human_policy_targets.append(human_pol)
 
             if len(graphs) < 2:
                 continue
@@ -446,6 +486,7 @@ class GameSequenceOfflineDataset(IterableDataset):
                     (len(graphs),), result_value, dtype=torch.float32
                 ),
                 "policy_targets": policy_targets,
+                "human_policy_targets": human_policy_targets,
                 "elo_norm": elo_norm,
                 "result_value": result_value,
             }

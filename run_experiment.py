@@ -86,6 +86,7 @@ RESULTS_CSV_FIELDS = [
     "best_val_top1", "best_val_top3",
     "best_val_v_mse", "best_val_q_kl",
     "eval_top1_acc", "eval_top3_acc",
+    "human_top1_acc", "human_top3_acc", "human_move_count",
     "puzzle_acc", "puzzle_n",
     "pearson_r", "spearman_rho",
     "ece_before", "ece_after", "temperature_t",
@@ -601,7 +602,12 @@ def evaluate_model(
 
     game_jsonl = cfg.get("game_jsonl")
     if game_jsonl and os.path.exists(game_jsonl):
-        hm = ev.evaluate_human_move_prediction(game_jsonl, k=cfg.get("eval_k", 3))
+        hm = ev.evaluate_human_move_prediction(
+            cfg.get("human_eval_jsonl") or game_jsonl,
+            k=cfg.get("eval_k", 3),
+            max_games=cfg.get("human_eval_max_games", 0),
+            max_positions=cfg.get("human_eval_max_positions", 0),
+        )
         eval_metrics["human_top1_acc"] = hm["top1_acc"]
         eval_metrics["human_top3_acc"] = hm.get(f"top{cfg.get('eval_k', 3)}_acc", 0.0)
         eval_metrics["human_move_count"] = hm["count"]

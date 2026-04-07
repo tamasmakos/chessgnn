@@ -8,6 +8,55 @@ from .distillation_pipeline import load_jsonl
 from .graph_builder import ChessGraphBuilder
 
 
+def legal_move_index_map(fen: str) -> dict[str, int]:
+    """Return the UCI-to-index mapping matching graph_builder move-edge order."""
+    board = chess.Board(fen)
+    uci_to_idx: dict[str, int] = {}
+    idx = 0
+    for move in board.legal_moves:
+        if board.piece_at(move.from_square) is None:
+            continue
+        uci_to_idx[move.uci()] = idx
+        idx += 1
+    return uci_to_idx
+
+
+def hard_policy_target(
+    move_uci: str | None,
+    fen: str,
+    num_legal_moves: int,
+    smoothing: float = 0.0,
+) -> torch.Tensor:
+    """Build a one-hot or lightly smoothed target over legal moves."""
+    if num_legal_moves <= 0:
+        return torch.empty(0, dtype=torch.float32)
+
+    move_idx = legal_move_index_map(fen).get(move_uci or "")
+    if move_idx is None:
+        return torch.empty(0, dtype=torch.float32)
+
+    probs = torch.zeros(num_legal_moves, dtype=torch.float32)
+    if smoothing > 0.0 and num_legal_moves > 1:
+        off_value = smoothing / float(num_legal_moves - 1)
+        probs.fill_(off_value)
+        probs[move_idx] = 1.0 - smoothing
+    else:
+        probs[move_idx] = 1.0
+    return probs
+
+
+def infer_played_move_uci(current_fen: str, next_fen: str) -> str | None:
+    """Recover the played move from two consecutive FENs, if legal and unique."""
+    board = chess.Board(current_fen)
+    for move in board.legal_moves:
+        board.push(move)
+        matches = board.fen() == next_fen
+        board.pop()
+        if matches:
+            return move.uci()
+    return None
+
+
 def soft_policy_target(
     top_k_moves: list[dict],
     fen: str,
@@ -33,16 +82,8 @@ def soft_policy_target(
     Tensor [M]
         Probability distribution over the M legal moves.
     """
-    board = chess.Board(fen)
     # Build UCI → index mapping matching graph_builder iteration order
-    uci_to_idx: dict[str, int] = {}
-    idx = 0
-    for move in board.legal_moves:
-        from_sq = move.from_square
-        # graph_builder skips moves whose from_sq has no piece (should never happen)
-        if board.piece_at(from_sq) is not None:
-            uci_to_idx[move.uci()] = idx
-            idx += 1
+    uci_to_idx = legal_move_index_map(fen)
 
     # Collect logits for matched moves; use large negative for unmatched
     logits = torch.full((num_legal_moves,), -1e9)
