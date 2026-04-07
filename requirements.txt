@@ -8,7 +8,8 @@ node2vec
 scikit-learn
 groq
 leidenalg
+torch
 torch_geometric
 opencv-python-headless
 numpy
-chess_pack
+scipy
