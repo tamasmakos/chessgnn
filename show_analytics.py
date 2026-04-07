@@ -27,7 +27,7 @@ from chessgnn.graph_builder import ChessGraphBuilder
 from chessgnn.lichess_api import read_lichess_game
 from chessgnn.model import GATEAUChessModel
 from chessgnn.theoretical import analyze_theoretical
-from tutor import CaseTutor
+from tutor import CaseTutor, _detect_tactics
 
 # ---------------------------------------------------------------------------
 # Constants
@@ -208,6 +208,84 @@ def print_report(
     print()
 
     # -----------------------------------------------------------------------
+    # Opening phase analysis
+    # -----------------------------------------------------------------------
+    print("─" * 60)
+    print("  OPENING PHASE ANALYSIS")
+    print()
+
+    _eco = game.headers.get("ECO", "")
+    pc = stats["piece_count_trajectory"]
+
+    # Phase detection: opening ends after 4+ captures or move 12
+    opening_end_idx = min(len(pc) - 1, 24)
+    for i in range(1, len(pc)):
+        if pc[0] - pc[i] >= 4:
+            opening_end_idx = i
+            break
+
+    endgame_start_idx = len(pc)
+    for i in range(opening_end_idx, len(pc)):
+        if pc[i] <= 14:
+            endgame_start_idx = i
+            break
+
+    opening_moves_n = (opening_end_idx + 1) // 2
+    midgame_moves_n = max(0, endgame_start_idx - opening_end_idx) // 2
+    endgame_moves_n = max(0, len(pc) - endgame_start_idx) // 2
+    has_endgame = endgame_start_idx < len(pc)
+
+    if _eco:
+        print(f"  Classification : {_eco} · {opening}")
+    elif opening:
+        print(f"  Classification : {opening}")
+
+    phase_str = f"Opening ~{opening_moves_n} moves"
+    if midgame_moves_n > 0:
+        phase_str += f"  →  Middlegame ~{midgame_moves_n} moves"
+    if has_endgame:
+        phase_str += f"  →  Endgame ~{endgame_moves_n} moves"
+    print(f"  Game phases    : {phase_str}")
+
+    if opening_end_idx < len(ev):
+        exit_eval = ev[opening_end_idx]
+        if abs(exit_eval) < 0.1:
+            balance_desc = "balanced"
+        elif exit_eval > 0.2:
+            balance_desc = f"white advantage ({exit_eval:+.2f})"
+        elif exit_eval < -0.2:
+            balance_desc = f"black advantage ({exit_eval:+.2f})"
+        else:
+            balance_desc = f"slight {'white' if exit_eval > 0 else 'black'} edge ({exit_eval:+.2f})"
+        print(f"  Opening exit   : {balance_desc}")
+
+    mr = stats.get("move_ranks")
+    mp = stats.get("move_percentiles")
+    if mr and mp:
+        n_op = min(opening_end_idx, len(mr))
+        w_pcts = [mp[i] for i in range(0, n_op, 2) if mp[i] is not None]
+        b_pcts = [mp[i] for i in range(1, n_op, 2) if mp[i] is not None]
+
+        if w_pcts:
+            w_acc = sum(w_pcts) / len(w_pcts)
+            print(f"  {w_name:<12} opening quality : {_bar(w_acc, 15)}  {w_acc*100:.0f}%")
+        if b_pcts:
+            b_acc = sum(b_pcts) / len(b_pcts)
+            print(f"  {b_name:<12} opening quality : {_bar(b_acc, 15)}  {b_acc*100:.0f}%")
+
+        for side_name_nov, start_nov in ((w_name, 0), (b_name, 1)):
+            for i in range(start_nov, n_op, 2):
+                if mr[i] is not None and mr[i] > 3:
+                    mv_num = (i // 2) + 1
+                    board_t = chess.Board(fens[i])
+                    san_t = board_t.san(chess.Move.from_uci(ucis[i]))
+                    print(f"  {side_name_nov:<12} first novelty   : "
+                          f"move {mv_num} ({san_t}) — "
+                          f"ranked {mr[i]}/{stats['legal_moves_trajectory'][i]}")
+                    break
+    print()
+
+    # -----------------------------------------------------------------------
     # Per-side summary
     # -----------------------------------------------------------------------
     print("─" * 60)
@@ -291,21 +369,82 @@ def print_report(
         print(f"                              ⬛ {bs['doubled']} doubled, {bs['isolated']} isolated")
 
     # -----------------------------------------------------------------------
-    # Game character & territory
+    # Game character & material
     # -----------------------------------------------------------------------
     print()
     print("─" * 60)
-    print("  GAME CHARACTER")
+    print("  GAME CHARACTER & MATERIAL")
     print()
     avg_unc  = stats["avg_complexity"]
     avg_br   = stats["avg_branching"]
     w_terr   = stats["white_territory"]
     b_terr   = stats["black_territory"]
-    print(f"  Avg legal moves (branching factor) : {avg_br:.1f}")
-    print(f"  Avg model uncertainty              : {avg_unc:.3f}  "
-          f"({'highly tactical' if avg_unc > 0.97 else 'model confident' if avg_unc < 0.85 else 'mixed'})")
-    print(f"  Avg pieces on board                : {stats['avg_piece_count']:.1f}")
+    pc = stats["piece_count_trajectory"]
+
+    if avg_unc > 0.97:
+        char_label = "Highly Tactical"
+    elif avg_unc > 0.92:
+        char_label = "Sharp / Tactical"
+    elif avg_unc > 0.85:
+        char_label = "Dynamic"
+    elif avg_unc > 0.70:
+        char_label = "Balanced"
+    else:
+        char_label = "Positional / Strategic"
+
+    total_captures = pc[0] - pc[-1]
+    n_full_moves = max((len(ucis) + 1) // 2, 1)
+    captures_per_10 = total_captures / n_full_moves * 10
+
+    print(f"  Character       : {char_label}  (uncertainty {avg_unc:.3f})")
+    print(f"  Branching       : {avg_br:.1f} avg legal moves  "
+          f"({'complex' if avg_br > 35 else 'normal' if avg_br > 25 else 'simplified'})")
+    print(f"  Sharpness       : {stats['game_sharpness']:.3f}  "
+          f"({'volatile' if stats['game_sharpness'] > 0.15 else 'steady'})")
     print()
+
+    # Material arc
+    if captures_per_10 > 3:
+        exch_style = "heavy exchanges"
+    elif captures_per_10 > 1.5:
+        exch_style = "moderate trading"
+    else:
+        exch_style = "quiet, few trades"
+
+    pc_spark = _sparkline([float(v) for v in pc], lo=min(pc), hi=max(pc))
+    print(f"  Material arc    : {pc[0]} → {pc[-1]} pieces  "
+          f"({total_captures} captures, {exch_style})")
+    print(f"    {pc_spark}")
+
+    exchanges = []
+    for i in range(1, len(pc)):
+        drop_pc = pc[i - 1] - pc[i]
+        if drop_pc >= 2:
+            mv_n = (i // 2) + 1
+            sd = "white" if (i - 1) % 2 == 0 else "black"
+            exchanges.append((mv_n, sd, drop_pc))
+    if exchanges:
+        print("  Exchanges       :")
+        for mv_n, sd, dp in exchanges[:5]:
+            print(f"    Move {mv_n} ({sd}) — {dp} pieces traded")
+    print()
+
+    # Centre pressure
+    cp_traj = stats.get("center_pressure_trajectory")
+    if cp_traj:
+        avg_cp = sum(cp_traj) / len(cp_traj)
+        cp_spark = _sparkline(cp_traj, 0.0, max(cp_traj) or 1.0)
+        if avg_cp > 0.15:
+            cp_style = "centre-dominant"
+        elif avg_cp < 0.05:
+            cp_style = "flank-oriented"
+        else:
+            cp_style = "mixed"
+        print(f"  Centre pressure : avg {avg_cp:.3f} ({cp_style})")
+        print(f"    {cp_spark}")
+        print()
+
+    # Territory
     print(f"  Territory (where pieces aimed to go):")
     print(f"    White half  {_bar(w_terr, 20)}  {w_terr*100:.0f}%")
     print(f"    Black half  {_bar(b_terr, 20)}  {b_terr*100:.0f}%")
@@ -322,6 +461,310 @@ def print_report(
     for d, s in zip(dest_lines, src_lines):
         print(f"  {d:<30}    {s}")
     print()
+
+    # -----------------------------------------------------------------------
+    # Structural analysis (centrality, coordination, community, tension)
+    # -----------------------------------------------------------------------
+    print("─" * 60)
+    print("  STRUCTURAL ANALYSIS")
+    print()
+
+    coord_spark    = _sparkline(stats["coordination_trajectory"],   0.0, 1.0, width=40)
+    central_spark  = _sparkline(stats["centrality_trajectory"],     0.0, 1.0, width=40)
+    tension_spark  = _sparkline(stats["tension_trajectory"],        0.0, 1.0, width=40)
+    comm_spark     = _sparkline(
+        [float(v) for v in stats["community_count_trajectory"]],
+        0.0, max(stats["community_count_trajectory"]) or 1.0,
+        width=40,
+    )
+
+    print(f"  Piece coordination  (active side, ↑ = tightly defended):")
+    print(f"    {coord_spark}")
+    print(f"  Mean centrality     (how connected pieces are, ↑ = high):")
+    print(f"    {central_spark}")
+    print(f"  Graph tension       (intra-color edge fraction, ↓ = more conflict):")
+    print(f"    {tension_spark}")
+    print(f"  Community clusters  (number of piece groups per position):")
+    print(f"    {comm_spark}")
+    print()
+    print(f"  Game averages:")
+    print(f"    Avg coordination : {stats['avg_coordination']:.3f}   "
+          "(0 = isolated pieces, 1 = all mutually defending)")
+    print(f"    Avg centrality   : {stats['avg_centrality']:.3f}   "
+          "(higher = pieces in the thick of the action)")
+    print(f"    Avg tension      : {stats['avg_tension']:.3f}   "
+          "(lower = more interplay between the two armies)")
+    print()
+
+    # -----------------------------------------------------------------------
+    # Structural fingerprint drift
+    # -----------------------------------------------------------------------
+    print("─" * 60)
+    print("  STRUCTURAL FINGERPRINT DRIFT")
+    print()
+
+    drift_traj = stats.get("structural_drift_trajectory") or []
+    if drift_traj:
+        drift_spark = _sparkline(drift_traj, 0.0, max(drift_traj) or 1.0, width=40)
+        print("  Local graph drift   (↑ = bigger change in relational structure):")
+        print(f"    {drift_spark}")
+        print()
+        print(f"  Avg local drift     : {stats['avg_structural_drift']:.3f}")
+        print(f"  Peak local drift    : {stats['peak_structural_drift']:.3f}")
+        print(f"  Opening→final drift : {stats['final_structural_distance']:.3f}")
+
+        turning_points = sorted(
+            range(1, len(drift_traj)),
+            key=lambda idx: drift_traj[idx],
+            reverse=True,
+        )[:3]
+        if turning_points:
+            print()
+            print("  Biggest structural shifts:")
+            for idx in turning_points:
+                board_t = chess.Board(fens[idx - 1])
+                move = chess.Move.from_uci(ucis[idx - 1])
+                move_label = f"{((idx - 1) // 2) + 1}{'w' if (idx - 1) % 2 == 0 else 'b'}"
+                print(
+                    f"    {move_label:<4} {board_t.san(move):<8} "
+                    f"drift {drift_traj[idx]:.3f}"
+                )
+        print()
+
+    # -----------------------------------------------------------------------
+    # Critical moments & tactical patterns
+    # -----------------------------------------------------------------------
+    print("─" * 60)
+    print("  CRITICAL MOMENTS & TACTICAL PATTERNS")
+    print()
+
+    pin_traj = stats["pin_count_trajectory"]
+    fork_traj = stats["fork_count_trajectory"]
+    n_tac = len(pin_traj)
+
+    tactical_positions = sum(
+        1 for i in range(n_tac) if pin_traj[i] > 0 or fork_traj[i] > 0
+    )
+    tac_density = tactical_positions / n_tac if n_tac else 0
+
+    print(f"  Tactical density : {tac_density * 100:.0f}% of positions "
+          f"({tactical_positions}/{n_tac}) had active motifs")
+    print(f"  Peak pins: {stats['peak_pins']}   "
+          f"Peak forks: {stats['peak_forks']}")
+    print()
+
+    # Build critical moments table with per-piece tactical details
+    critical_moments: list[tuple] = []
+    for i in range(n_tac):
+        if pin_traj[i] == 0 and fork_traj[i] == 0:
+            continue
+        board_t = chess.Board(fens[i])
+        tactics = _detect_tactics(board_t)
+        motifs: list[str] = []
+        if tactics["pins"]:
+            motifs.append(f"Pin: {', '.join(tactics['pins'])}")
+        if tactics["forks"]:
+            for fk in tactics["forks"]:
+                motifs.append(f"Fork: {fk['attacker']}→{', '.join(fk['victims'])}")
+        if tactics["overloaded_squares"]:
+            motifs.append(f"Overloaded: {', '.join(tactics['overloaded_squares'])}")
+
+        mv_n = (i // 2) + 1
+        sd = "w" if i % 2 == 0 else "b"
+        played = ""
+        if i < len(ucis):
+            played = board_t.san(chess.Move.from_uci(ucis[i]))
+        drop_s = ""
+        ed = stats.get("eval_drops")
+        if ed and i < len(ed) and ed[i] is not None:
+            d = ed[i]
+            if d > 0.15:
+                drop_s = f"BLUNDER {d:+.2f}"
+            elif d > 0.075:
+                drop_s = f"miss {d:+.2f}"
+            elif d < -0.05:
+                drop_s = f"exploited {d:+.2f}"
+            else:
+                drop_s = f"{d:+.2f}"
+        critical_moments.append((mv_n, sd, "; ".join(motifs), played, drop_s))
+
+    if critical_moments:
+        print(f"  {'Move':>4}  {'Motif':<38}  {'Played':<8}  {'Result'}")
+        print("  " + "─" * 60)
+        for mv_n, sd, mot, played, dr in critical_moments:
+            mot_d = (mot[:36] + "..") if len(mot) > 38 else mot
+            print(f"  {mv_n:>3}{sd}  {mot_d:<38}  {played:<8}  {dr}")
+        print()
+    else:
+        print("  No pins, forks, or overloaded defenders detected.")
+        print()
+
+    # Tension arc (contested squares between armies)
+    tension_vals = stats.get("tension_trajectory")
+    if tension_vals:
+        avg_tension_t = sum(tension_vals) / len(tension_vals)
+        t_spark = _sparkline(tension_vals, 0.0, 1.0)
+        print(f"  Tension arc (contested squares — ↓ = more cross-army conflict):")
+        print(f"    {t_spark}  avg {avg_tension_t:.2f}")
+
+    # Game-level tactical insights
+    insights_tac: list[str] = []
+    if tac_density > 0.3:
+        insights_tac.append("  ● Tactically rich — motifs in >30% of positions.")
+    elif tac_density > 0.1:
+        insights_tac.append("  ● Moderate tactical content.")
+    else:
+        insights_tac.append("  · Quiet positional game — few tactical complications.")
+    if stats["peak_pins"] >= 2:
+        insights_tac.append("  ● Pin-heavy game — pin awareness was important.")
+    if stats["peak_forks"] >= 2:
+        insights_tac.append("  ● Multiple fork threats arose — check for missed wins.")
+    for ins_t in insights_tac:
+        print(ins_t)
+    print()
+
+    # -----------------------------------------------------------------------
+    # GNN piece importance
+    # -----------------------------------------------------------------------
+    traj = stats.get("piece_importance_trajectory")
+    if traj:
+        print("─" * 60)
+        print("  GNN PIECE IMPORTANCE TRAJECTORY")
+        print("  (L2-norm of each piece's final GNN embedding, normalised per position)")
+        print("  Measures how much model computation passed through each piece node.")
+        print()
+
+        # Collect all squares that appear across the game and their per-position importance
+        all_squares: dict[str, list[float | None]] = {}
+        n_pos = len(traj)
+        for pos_idx, pos_dict in enumerate(traj):
+            for sq, imp in pos_dict.items():
+                if sq not in all_squares:
+                    all_squares[sq] = [None] * n_pos
+                all_squares[sq][pos_idx] = imp
+
+        # Rank squares by mean importance (ignoring None = piece not on board)
+        def _mean_imp(vals: list[float | None]) -> float:
+            present = [v for v in vals if v is not None]
+            return sum(present) / len(present) if present else 0.0
+
+        def _peak_imp(vals: list[float | None]) -> float:
+            present = [v for v in vals if v is not None]
+            return max(present) if present else 0.0
+
+        def _peak_pos(vals: list[float | None]) -> int:
+            return max(
+                (i for i, v in enumerate(vals) if v is not None),
+                key=lambda i: vals[i] or 0.0,
+                default=0,
+            )
+
+        ranked = sorted(all_squares.items(), key=lambda kv: _mean_imp(kv[1]), reverse=True)
+        top_n = ranked[:8]
+
+        # Top piece per move (the single most activated node at each position)
+        top_per_move = []
+        for pos_dict in traj:
+            if pos_dict:
+                best_sq = max(pos_dict, key=lambda s: pos_dict[s])
+                top_per_move.append((best_sq, pos_dict[best_sq]))
+            else:
+                top_per_move.append(("—", 0.0))
+
+        # Rank by variance: the pieces that fluctuate most are tactically relevant
+        def _variance(vals: list[float | None]) -> float:
+            present = [v for v in vals if v is not None]
+            if len(present) < 2:
+                return 0.0
+            mean = sum(present) / len(present)
+            return sum((v - mean) ** 2 for v in present) / len(present)
+
+        ranked = sorted(all_squares.items(), key=lambda kv: _variance(kv[1]), reverse=True)
+        top_n = ranked[:8]
+
+        print(f"  {'Square':<8}  {'Sparkline (relative importance per position)':<42}  {'Avg':>5}  {'Var':>5}  {'@peak':>5}")
+        print("  " + "─" * 68)
+        for sq, vals in top_n:
+            # Sparkline relative to each *position's* max — show rank within position
+            spark_chars = []
+            for pos_idx, v in enumerate(vals):
+                if v is None:
+                    spark_chars.append(" ")
+                else:
+                    pos_dict = traj[pos_idx]
+                    pos_max = max(pos_dict.values()) if pos_dict else 1.0
+                    pos_min = min(pos_dict.values()) if pos_dict else 0.0
+                    rng = pos_max - pos_min or 1.0
+                    rel = (v - pos_min) / rng
+                    idx = int(round(rel * (len(_SPARK) - 1)))
+                    spark_chars.append(_SPARK[max(0, min(len(_SPARK) - 1, idx))])
+            spark_str = "".join(spark_chars)
+            avg  = _mean_imp(vals)
+            var  = _variance(vals)
+            pmov = _peak_pos(vals) + 1
+            print(f"  {sq:<8}  {spark_str:<42}  {avg:>5.2f}  {var:>5.3f}  {pmov:>5}")
+
+        print()
+        print(f"  Top piece by GNN activation at each half-move:")
+        for i, (sq, imp) in enumerate(top_per_move):
+            move_label = f"{(i // 2) + 1}{'w' if i % 2 == 0 else 'b'}"
+            print(f"    {move_label:<5} {sq:<6} ({imp:.2f})", end="  ")
+            if (i + 1) % 5 == 0:
+                print()
+        if len(top_per_move) % 5 != 0:
+            print()
+        print()
+
+        # Game-level insights using relative ranking
+        # Most volatile piece (highest variance = most tactically active)
+        volatile = sorted(all_squares.items(), key=lambda kv: _variance(kv[1]), reverse=True)
+        if volatile:
+            sq_v, vals_v = volatile[0]
+            print(f"  ● Most volatile piece (tactics indicator) : {sq_v}  (var={_variance(vals_v):.3f})")
+
+        # Piece that was consistently *top-ranked* within positions the most often
+        top_count: dict[str, int] = {}
+        for pos_dict in traj:
+            if pos_dict:
+                best = max(pos_dict, key=lambda s: pos_dict[s])
+                top_count[best] = top_count.get(best, 0) + 1
+        if top_count:
+            dominant_sq = max(top_count, key=lambda s: top_count[s])
+            print(f"  ● Most frequently #1 piece               : {dominant_sq}  ({top_count[dominant_sq]} positions)")
+
+        # Pieces whose importance spiked late (last quarter of the game)
+        late_start = int(n_pos * 0.75)
+        late_entry = [
+            (sq, max(v for v in vals[late_start:] if v is not None), _variance(vals[late_start:]))
+            for sq, vals in all_squares.items()
+            if any(v is not None for v in vals[late_start:])
+        ]
+        if late_entry:
+            sq_ls, imp_ls, var_ls = max(late_entry, key=lambda x: x[2])
+            print(f"  ● Most dynamically active late-game piece : {sq_ls}  (late var={var_ls:.3f})")
+
+        # Pieces present the whole game (long-lived) with highest mean relative rank
+        full_game_sqs = [
+            sq for sq, vals in all_squares.items()
+            if sum(1 for v in vals if v is not None) >= int(n_pos * 0.75)
+        ]
+        if full_game_sqs:
+            # Relative rank: fraction of positions where this piece is above median importance
+            def _above_median_frac(sq: str) -> float:
+                count = above = 0
+                for pos_dict in traj:
+                    if sq not in pos_dict:
+                        continue
+                    count += 1
+                    median_val = sorted(pos_dict.values())[len(pos_dict) // 2]
+                    if pos_dict[sq] >= median_val:
+                        above += 1
+                return above / count if count else 0.0
+
+            sq_fg = max(full_game_sqs, key=_above_median_frac)
+            frac  = _above_median_frac(sq_fg)
+            print(f"  ● Most sustained above-median piece       : {sq_fg}  ({frac*100:.0f}% of positions above median)")
+        print()
 
     # -----------------------------------------------------------------------
     # Coaching insights

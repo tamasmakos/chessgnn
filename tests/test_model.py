@@ -250,3 +250,45 @@ class TestForwardSequenceWithQ:
         assert values.shape == (1, 1)
         assert len(q_list) == 1
         assert len(edge_list) == 1
+
+
+# ---------------------------------------------------------------------------
+# return_embeddings flag
+# ---------------------------------------------------------------------------
+
+class TestReturnEmbeddings:
+    def test_embeddings_appended_when_flag_set(self, model_full, builder_full):
+        graph = builder_full.fen_to_graph(STARTING_FEN)
+        with torch.no_grad():
+            out = model_full.forward_with_q(graph, return_embeddings=True)
+        assert len(out) == 4  # value, q_scores, move_edge_index, x_dict
+
+    def test_embeddings_not_appended_by_default(self, model_full, builder_full):
+        graph = builder_full.fen_to_graph(STARTING_FEN)
+        with torch.no_grad():
+            out = model_full.forward_with_q(graph)
+        assert len(out) == 3
+
+    def test_piece_embeddings_shape(self, model_full, builder_full):
+        graph = builder_full.fen_to_graph(STARTING_FEN)
+        with torch.no_grad():
+            _, _, _, x_dict = model_full.forward_with_q(graph, return_embeddings=True)
+        H = model_full.hidden_channels
+        assert x_dict["piece"].shape == (32, H)
+
+    def test_piece_embeddings_finite(self, model_full, builder_full):
+        graph = builder_full.fen_to_graph(STARTING_FEN)
+        with torch.no_grad():
+            _, _, _, x_dict = model_full.forward_with_q(graph, return_embeddings=True)
+        assert torch.isfinite(x_dict["piece"]).all()
+
+    def test_return_cache_and_embeddings_together(self, model_full, builder_full):
+        graph = builder_full.fen_to_graph(STARTING_FEN)
+        with torch.no_grad():
+            out = model_full.forward_with_q(
+                graph, return_cache=True, return_embeddings=True
+            )
+        # value, q_scores, move_edge_index, cache, x_dict
+        assert len(out) == 5
+        assert isinstance(out[3], type(out[3]))  # KVCache
+        assert isinstance(out[4], dict)

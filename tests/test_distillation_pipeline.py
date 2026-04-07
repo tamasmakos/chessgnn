@@ -2,6 +2,7 @@ import json
 import math
 import os
 import tempfile
+from textwrap import dedent
 
 import chess
 import pytest
@@ -10,6 +11,7 @@ from chessgnn.distillation_pipeline import (
     cp_to_winprob,
     evaluate_positions,
     load_jsonl,
+    sample_games_from_pgn,
     sample_positions_from_pgn,
     save_jsonl,
 )
@@ -73,6 +75,76 @@ class TestSamplePositions:
     def test_respects_max_positions(self):
         fens = list(sample_positions_from_pgn(PGN_FILE, max_positions=5))
         assert len(fens) <= 5
+
+
+class TestSampleGamesFromPgn:
+    def test_filters_by_average_elo(self, tmp_path):
+        pgn_path = tmp_path / "sample_games.pgn"
+        pgn_path.write_text(dedent("""
+        [Event "High Elo"]
+        [Site "?"]
+        [Date "2026.04.06"]
+        [Round "1"]
+        [White "A"]
+        [Black "B"]
+        [Result "1-0"]
+        [WhiteElo "1800"]
+        [BlackElo "1700"]
+
+        1. e4 e5 2. Nf3 Nc6 3. Bc4 Bc5 4. c3 Nf6 5. d3 d6 6. O-O O-O 1-0
+
+        [Event "Low Elo"]
+        [Site "?"]
+        [Date "2026.04.06"]
+        [Round "1"]
+        [White "C"]
+        [Black "D"]
+        [Result "0-1"]
+        [WhiteElo "1300"]
+        [BlackElo "1400"]
+
+        1. d4 d5 2. c4 e6 3. Nc3 Nf6 4. Bg5 Be7 5. e3 O-O 6. Nf3 Nbd7 0-1
+        """).strip() + "\n")
+
+        games = list(sample_games_from_pgn(str(pgn_path), max_games=10, min_move=2, elo_min=1600))
+
+        assert len(games) == 1
+        assert games[0]["white_elo"] == 1800
+        assert games[0]["black_elo"] == 1700
+
+    def test_filters_by_average_elo_upper_bound(self, tmp_path):
+        pgn_path = tmp_path / "sample_games_max.pgn"
+        pgn_path.write_text(dedent("""
+        [Event "Too High"]
+        [Site "?"]
+        [Date "2026.04.06"]
+        [Round "1"]
+        [White "A"]
+        [Black "B"]
+        [Result "1/2-1/2"]
+        [WhiteElo "2200"]
+        [BlackElo "2100"]
+
+        1. e4 e5 2. Nf3 Nc6 3. Bc4 Bc5 4. c3 Nf6 5. d3 d6 6. O-O O-O 1/2-1/2
+
+        [Event "In Range"]
+        [Site "?"]
+        [Date "2026.04.06"]
+        [Round "1"]
+        [White "C"]
+        [Black "D"]
+        [Result "1-0"]
+        [WhiteElo "1650"]
+        [BlackElo "1550"]
+
+        1. d4 d5 2. c4 e6 3. Nc3 Nf6 4. Bg5 Be7 5. e3 O-O 6. Nf3 Nbd7 1-0
+        """).strip() + "\n")
+
+        games = list(sample_games_from_pgn(str(pgn_path), max_games=10, min_move=2, elo_min=1500, elo_max=1800))
+
+        assert len(games) == 1
+        assert games[0]["white_elo"] == 1650
+        assert games[0]["black_elo"] == 1550
 
 
 # ------------------------------------------------------------------

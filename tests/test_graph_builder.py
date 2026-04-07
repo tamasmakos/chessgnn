@@ -17,8 +17,8 @@ class TestChessGraphBuilderBase:
 
     def test_piece_node_count_starting(self):
         data = self.builder.fen_to_graph(STARTING_FEN)
-        # 32 pieces on the starting board
-        assert data['piece'].x.shape == (32, 10)
+        # 32 pieces, 15 features (10 base + 5 structural centrality/community)
+        assert data['piece'].x.shape == (32, 15)
 
     def test_square_node_count(self):
         data = self.builder.fen_to_graph(STARTING_FEN)
@@ -32,6 +32,9 @@ class TestChessGraphBuilderBase:
         assert x[:, 9].min() >= 0.0 and x[:, 9].max() <= 1.0  # rank
         # color is +1 or -1
         assert set(x[:, 6].tolist()).issubset({1.0, -1.0})
+        # structural features (cols 10-14) must be in [0, 1]
+        assert x[:, 10:].min() >= 0.0 - 1e-5
+        assert x[:, 10:].max() <= 1.0 + 1e-5
 
     def test_fen_attribute_set(self):
         data = self.builder.fen_to_graph(STARTING_FEN)

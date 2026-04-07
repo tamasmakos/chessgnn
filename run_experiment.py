@@ -17,6 +17,7 @@ Config schema
     "accumulation_steps": int,       // default 32
     "lambda_v":        float,        // value loss weight (default 1.0)
     "lambda_q":        float,        // policy loss weight (default 1.0)
+    "lambda_q_human":  float,        // played-move policy loss weight (default 0.0)
     "temperature":     float,        // KL temperature (default 1.0)
     "val_split":       float,        // fraction for validation (default 0.1)
     "puzzle_csv":      str | null,   // path to Lichess puzzle CSV (optional)
@@ -148,6 +149,7 @@ def _train_sequential(
     accum = cfg.get("accumulation_steps", 16)
     lv = cfg.get("lambda_v", 1.0)
     lq = cfg.get("lambda_q", 1.0)
+    lq_human = cfg.get("lambda_q_human", 0.0)
     l_out = cfg.get("lambda_outcome", 0.5)
     temp = cfg.get("temperature", 1.0)
     run_name = cfg["run_name"]
@@ -172,15 +174,28 @@ def _train_sequential(
             depth=cfg.get("sf_depth", 8),
             multipv_k=cfg.get("multipv_k", 5),
             num_workers=cfg.get("num_sf_workers", 4),
+            elo_min=cfg.get("elo_min", 0),
+            elo_max=cfg.get("elo_max", 9999),
         )
     else:
         logger.info("[%s] Reusing existing game labels: %s", run_name, game_jsonl)
 
     # ---- Training phase: load from JSONL (no Stockfish during training) ----
-    train_ds = GameSequenceOfflineDataset(game_jsonl, temperature=temp)
+    train_ds = GameSequenceOfflineDataset(
+        game_jsonl,
+        temperature=temp,
+        elo_min=cfg.get("elo_min", 0),
+        elo_max=cfg.get("elo_max", 9999),
+    )
     dl_num_workers = min(cfg.get("dl_workers", 4), os.cpu_count() or 1)
-    logger.info("[%s] Training phase: %d games, %d DataLoader workers",
-                run_name, len(train_ds), dl_num_workers)
+    logger.info(
+        "[%s] Training phase: %d labelled games, %d DataLoader workers, ELO range [%d, %d]",
+        run_name,
+        len(train_ds),
+        dl_num_workers,
+        cfg.get("elo_min", 0),
+        cfg.get("elo_max", 9999),
+    )
 
     train_loader = DataLoader(
         train_ds, batch_size=1, collate_fn=lambda b: b[0],
@@ -199,7 +214,7 @@ def _train_sequential(
 
     for epoch in range(epochs):
         model.train()
-        total_loss = total_v_sf = total_v_out = total_q = 0.0
+        total_loss = total_v_sf = total_v_out = total_q = total_q_human = 0.0
         step = 0
         optimizer.zero_grad()
         pbar = tqdm(
@@ -213,6 +228,7 @@ def _train_sequential(
             sf_targets = game["value_targets_sf"].to(device, non_blocking=True)
             outcome_targets = game["value_targets_outcome"].to(device, non_blocking=True)
             policy_targets_list = game["policy_targets"]
+            human_policy_targets_list = game.get("human_policy_targets", [])
             elo_norm: float = float(game["elo_norm"])
             T = len(graphs)
 
@@ -225,7 +241,9 @@ def _train_sequential(
             l_v_out = F.mse_loss(values_player.squeeze(-1), outcome_targets)
 
             l_q_sum = torch.tensor(0.0, device=device)
+            l_q_human_sum = torch.tensor(0.0, device=device)
             valid_t = 0
+            valid_t_human = 0
             for t_idx in range(T):
                 pt = policy_targets_list[t_idx]
                 if not isinstance(pt, torch.Tensor):
@@ -237,9 +255,16 @@ def _train_sequential(
                 log_q = F.log_softmax(q / temp, dim=0)
                 l_q_sum = l_q_sum + F.kl_div(log_q, pt, reduction="sum")
                 valid_t += 1
+                if t_idx < len(human_policy_targets_list):
+                    human_pt = human_policy_targets_list[t_idx]
+                    if isinstance(human_pt, torch.Tensor) and human_pt.numel() > 0:
+                        human_pt = human_pt.to(device)
+                        l_q_human_sum = l_q_human_sum + F.kl_div(log_q, human_pt, reduction="sum")
+                        valid_t_human += 1
             l_q_mean = l_q_sum / max(valid_t, 1)
+            l_q_human_mean = l_q_human_sum / max(valid_t_human, 1)
 
-            loss = (lv * l_v_sf + l_out * l_v_out + lq * l_q_mean) / accum
+            loss = (lv * l_v_sf + l_out * l_v_out + lq * l_q_mean + lq_human * l_q_human_mean) / accum
             loss.backward()
 
             if not math.isnan(loss.item()):
@@ -247,6 +272,7 @@ def _train_sequential(
                 total_v_sf += l_v_sf.item()
                 total_v_out += l_v_out.item()
                 total_q += l_q_mean.item()
+                total_q_human += l_q_human_mean.item()
             step += 1
 
             if (i + 1) % accum == 0:
@@ -257,6 +283,7 @@ def _train_sequential(
                 loss=f"{total_loss/step:.4f}",
                 v_sf=f"{total_v_sf/step:.4f}",
                 q=f"{total_q/step:.4f}",
+                qh=f"{total_q_human/step:.4f}",
             )
 
         torch.nn.utils.clip_grad_norm_(model.parameters(), 1.0)
@@ -270,17 +297,19 @@ def _train_sequential(
             "v_sf": total_v_sf / max(step, 1),
             "v_out": total_v_out / max(step, 1),
             "q": total_q / max(step, 1),
+            "q_human": total_q_human / max(step, 1),
             "val_top1": m["val_top1_acc"],
             "val_top3": m["val_top3_acc"],
         })
         logger.info(
-            "[%s] Epoch %d/%d  loss=%.4f (v_sf=%.4f v_out=%.4f q=%.4f)  "
+            "[%s] Epoch %d/%d  loss=%.4f (v_sf=%.4f v_out=%.4f q=%.4f q_human=%.4f)  "
             "val_top1=%.1f%%  val_top3=%.1f%%",
             run_name, epoch + 1, epochs,
             total_loss / max(step, 1),
             total_v_sf / max(step, 1),
             total_v_out / max(step, 1),
             total_q / max(step, 1),
+            total_q_human / max(step, 1),
             m["val_top1_acc"] * 100, m["val_top3_acc"] * 100,
         )
         if m["val_top1_acc"] > best_top1:
@@ -368,15 +397,19 @@ def train_model(cfg: dict, device: torch.device) -> tuple[GATEAUChessModel, dict
     builder = ChessGraphBuilder(use_global_node=True, use_move_edges=True)
 
     # --- Build val_loader (shared across all modes) ---
-    val_jsonl = cfg.get("val_jsonl") or cfg.get("data_jsonl")
+    explicit_val_jsonl = cfg.get("val_jsonl")
+    val_jsonl = explicit_val_jsonl or cfg.get("data_jsonl")
     if val_jsonl and os.path.exists(val_jsonl):
         val_full = DistillationDataset(val_jsonl, temperature=temp)
-        n_val = max(1, int(len(val_full) * val_split))
+        if explicit_val_jsonl:
+            val_indices = list(range(len(val_full)))
+        else:
+            val_indices = list(range(max(1, int(len(val_full) * val_split))))
         val_loader = DataLoader(
-            Subset(val_full, list(range(n_val))),
+            Subset(val_full, val_indices),
             batch_size=1, collate_fn=distillation_collate,
         )
-        logger.info("[%s] Val set: %d positions from %s", run_name, n_val, val_jsonl)
+        logger.info("[%s] Val set: %d positions from %s", run_name, len(val_indices), val_jsonl)
     else:
         val_loader = None
 
@@ -565,6 +598,13 @@ def evaluate_model(
     else:
         eval_metrics.update({"eval_top1_acc": 0.0, "eval_top3_acc": 0.0,
                              "pearson_r": 0.0, "spearman_rho": 0.0})
+
+    game_jsonl = cfg.get("game_jsonl")
+    if game_jsonl and os.path.exists(game_jsonl):
+        hm = ev.evaluate_human_move_prediction(game_jsonl, k=cfg.get("eval_k", 3))
+        eval_metrics["human_top1_acc"] = hm["top1_acc"]
+        eval_metrics["human_top3_acc"] = hm.get(f"top{cfg.get('eval_k', 3)}_acc", 0.0)
+        eval_metrics["human_move_count"] = hm["count"]
 
     # Puzzle accuracy (optional)
     puzzle_csv = cfg.get("puzzle_csv")

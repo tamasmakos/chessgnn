@@ -53,6 +53,19 @@ SAMPLE_LABELS = [
     },
 ]
 
+SAMPLE_GAMES = [
+    {
+        "fens": [
+            STARTING_FEN,
+            "rnbqkbnr/pppppppp/8/8/4P3/8/PPPP1PPP/RNBQKBNR b KQkq - 0 1",
+            "rnbqkbnr/pppp1ppp/8/4p3/4P3/8/PPPP1PPP/RNBQKBNR w KQkq - 0 2",
+        ],
+        "white_elo": 1800,
+        "black_elo": 1700,
+        "result": "1-0",
+    }
+]
+
 # A minimal Lichess puzzle (FEN before opponent blunder + solution moves)
 # From board after 1.e4 e5 - a simple king pawn game position
 # Here we just construct a puzzle-like tuple; correctness of chess logic is
@@ -64,6 +77,12 @@ _PUZZLE_FEN = "r1bqkbnr/pppp1ppp/2n5/4p3/2B1P3/5N2/PPPP1PPP/RNBQK2R b KQkq - 3 3
 def _write_sample_jsonl(path: str) -> None:
     with open(path, "w") as f:
         for rec in SAMPLE_LABELS:
+            f.write(json.dumps(rec) + "\n")
+
+
+def _write_sample_games_jsonl(path: str) -> None:
+    with open(path, "w") as f:
+        for rec in SAMPLE_GAMES:
             f.write(json.dumps(rec) + "\n")
 
 
@@ -281,6 +300,46 @@ class TestEvaluateEngineAgreement:
             result = evaluator.evaluate_engine_agreement(tf.name, k=1)
         os.unlink(tf.name)
         assert result["count"] == 0
+
+
+class TestEvaluateHumanMovePrediction:
+    def test_returns_expected_keys(self, evaluator, monkeypatch):
+        monkeypatch.setattr(
+            evaluator,
+            "_pick_topk_moves_uci",
+            lambda fen, k=3: ["e2e4", "d2d4", "g1f3"] if fen == STARTING_FEN else ["e7e5", "c7c5", "d7d5"],
+        )
+        with tempfile.NamedTemporaryFile(mode="w", suffix=".jsonl", delete=False) as tf:
+            _write_sample_games_jsonl(tf.name)
+            result = evaluator.evaluate_human_move_prediction(tf.name, k=3)
+        os.unlink(tf.name)
+        assert "top1_acc" in result
+        assert "top3_acc" in result
+        assert "count" in result
+
+    def test_count_matches_move_transitions(self, evaluator, monkeypatch):
+        monkeypatch.setattr(
+            evaluator,
+            "_pick_topk_moves_uci",
+            lambda fen, k=3: ["e2e4", "d2d4", "g1f3"] if fen == STARTING_FEN else ["e7e5", "c7c5", "d7d5"],
+        )
+        with tempfile.NamedTemporaryFile(mode="w", suffix=".jsonl", delete=False) as tf:
+            _write_sample_games_jsonl(tf.name)
+            result = evaluator.evaluate_human_move_prediction(tf.name, k=3)
+        os.unlink(tf.name)
+        assert result["count"] == 2
+
+    def test_topk_ge_top1(self, evaluator, monkeypatch):
+        monkeypatch.setattr(
+            evaluator,
+            "_pick_topk_moves_uci",
+            lambda fen, k=3: ["a2a3", "e2e4", "d2d4"] if fen == STARTING_FEN else ["a7a6", "e7e5", "c7c5"],
+        )
+        with tempfile.NamedTemporaryFile(mode="w", suffix=".jsonl", delete=False) as tf:
+            _write_sample_games_jsonl(tf.name)
+            result = evaluator.evaluate_human_move_prediction(tf.name, k=3)
+        os.unlink(tf.name)
+        assert result["top3_acc"] >= result["top1_acc"]
 
 
 # ---------------------------------------------------------------------------

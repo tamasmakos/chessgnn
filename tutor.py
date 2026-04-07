@@ -1,6 +1,8 @@
 import math
 import torch
 import chess
+import networkx as nx
+from chessgnn.fingerprint import build_interaction_graph, fingerprint_similarity, position_fingerprint
 from chessgnn.graph_builder import ChessGraphBuilder
 from chessgnn.calibration import TemperatureScaler
 
@@ -16,6 +18,154 @@ _EXT_CENTER_SQUARES = frozenset({          # expanded centre: c3–f6
     chess.C5, chess.D5, chess.E5, chess.F5,
     chess.C6, chess.D6, chess.E6, chess.F6,
 })
+
+
+# ---------------------------------------------------------------------------
+# Module-level graph-structural helpers (no class state needed)
+# ---------------------------------------------------------------------------
+
+def _interaction_graph(board: chess.Board) -> nx.DiGraph:
+    """Build a directed NetworkX graph from the piece interaction structure."""
+    return build_interaction_graph(board)
+
+
+def _detect_tactics(board: chess.Board) -> dict:
+    """Detect tactical motifs present in *board* from python-chess primitives.
+
+    Returns a JSON-safe dict with the following keys:
+
+    * ``pins``               — list of pinned piece square names.
+    * ``forks``              — list of dicts ``{attacker, victims}`` where the
+      attacker simultaneously threatens ≥2 higher-value enemy pieces.
+    * ``tension_squares``    — squares where both sides have attackers.
+    * ``overloaded_squares`` — squares occupied by a piece that defends ≥3
+      friendly pieces.
+    * ``contested_count``    — len(tension_squares).
+    """
+    _VALS = {chess.PAWN: 1, chess.KNIGHT: 3, chess.BISHOP: 3,
+             chess.ROOK: 5, chess.QUEEN: 9, chess.KING: 10}
+
+    # Pins
+    pins: list[str] = []
+    for color in (chess.WHITE, chess.BLACK):
+        for sq in board.piece_map():
+            piece = board.piece_at(sq)
+            if piece and piece.color == color and board.is_pinned(color, sq):
+                pins.append(chess.square_name(sq))
+
+    # Forks: a piece simultaneously attacking 2+ higher-value enemy pieces
+    forks: list[dict] = []
+    piece_map = board.piece_map()
+    for sq_src, piece_src in piece_map.items():
+        val_src = _VALS[piece_src.piece_type]
+        victims = [
+            chess.square_name(sq_dst)
+            for sq_dst in board.attacks(sq_src)
+            if sq_dst in piece_map
+            and piece_map[sq_dst].color != piece_src.color
+            and _VALS[piece_map[sq_dst].piece_type] > val_src
+        ]
+        if len(victims) >= 2:
+            forks.append({
+                "attacker": chess.square_name(sq_src),
+                "victims":  victims,
+            })
+
+    # Tension squares: mutual attackers
+    tension: list[str] = []
+    for sq in chess.SQUARES:
+        w = len(board.attackers(chess.WHITE, sq))
+        b = len(board.attackers(chess.BLACK, sq))
+        if w > 0 and b > 0:
+            tension.append(chess.square_name(sq))
+
+    # Overloaded defenders: a piece defending ≥3 friendly pieces
+    overloaded: list[str] = []
+    for sq_src, piece_src in piece_map.items():
+        defended = [
+            sq_dst for sq_dst in board.attacks(sq_src)
+            if sq_dst in piece_map
+            and piece_map[sq_dst].color == piece_src.color
+        ]
+        if len(defended) >= 3:
+            overloaded.append(chess.square_name(sq_src))
+
+    return {
+        "pins":              pins,
+        "forks":             forks,
+        "tension_squares":   tension,
+        "overloaded_squares": overloaded,
+        "contested_count":   len(tension),
+    }
+
+
+def _structural_metrics(board: chess.Board, graph: nx.DiGraph | None = None) -> dict:
+    """Compute graph-structural metrics for *board* using the interaction graph.
+
+    Returns a dict with keys:
+
+    * ``white_coordination``  — edge density of white's defense subgraph [0, 1].
+      High = pieces tightly supporting each other.
+    * ``black_coordination``  — same for black.
+    * ``white_mean_centrality`` — mean degree centrality of white pieces [0, 1].
+    * ``black_mean_centrality`` — mean degree centrality of black pieces [0, 1].
+    * ``community_count``     — number of distinct communities in the full
+      interaction graph (Louvain/label-propagation on the undirected version).
+    * ``modularity_proxy``    — fraction of edges that are intra-color (defense)
+      vs total. High = pieces mostly cooperate within their own side.
+    """
+    G = graph or _interaction_graph(board)
+    if G.number_of_nodes() == 0:
+        return {
+            "white_coordination":    0.0,
+            "black_coordination":    0.0,
+            "white_mean_centrality": 0.0,
+            "black_mean_centrality": 0.0,
+            "community_count":       0,
+            "modularity_proxy":      0.0,
+        }
+
+    dc = nx.degree_centrality(G)  # {node: centrality}
+
+    white_nodes = [n for n, d in G.nodes(data=True) if d["color"] == chess.WHITE]
+    black_nodes = [n for n, d in G.nodes(data=True) if d["color"] == chess.BLACK]
+
+    # Mean degree centrality per side
+    wc = round(sum(dc[n] for n in white_nodes) / len(white_nodes), 6) if white_nodes else 0.0
+    bc = round(sum(dc[n] for n in black_nodes) / len(black_nodes), 6) if black_nodes else 0.0
+
+    # Edge density of defense-only subgraph per side
+    def _defense_density(nodes: list[int]) -> float:
+        if len(nodes) < 2:
+            return 0.0
+        n = len(nodes)
+        defense_edges = sum(
+            1 for u, v, d in G.edges(data=True)
+            if u in nodes and v in nodes and d["kind"] == "defense"
+        )
+        return round(defense_edges / (n * (n - 1)), 6)  # directed density
+
+    w_dens = _defense_density(white_nodes)
+    b_dens = _defense_density(black_nodes)
+
+    # Modularity proxy: fraction of edges that are intra-color (defense)
+    total_edges = G.number_of_edges()
+    intra_edges = sum(1 for _, _, d in G.edges(data=True) if d["kind"] == "defense")
+    mod_proxy = round(intra_edges / total_edges, 6) if total_edges else 0.0
+
+    # Community count: label propagation on undirected interaction graph
+    U = G.to_undirected()
+    communities = list(nx.algorithms.community.label_propagation_communities(U))
+    n_comm = len(communities)
+
+    return {
+        "white_coordination":    w_dens,
+        "black_coordination":    b_dens,
+        "white_mean_centrality": wc,
+        "black_mean_centrality": bc,
+        "community_count":       n_comm,
+        "modularity_proxy":      mod_proxy,
+    }
 
 
 class CaseTutor:
@@ -137,7 +287,13 @@ class CaseTutor:
         """Single-pass move ranking via Q-head."""
         graph = self.builder.fen_to_graph(fen).to(self.device)
         with torch.no_grad():
-            value, q_scores, _ = self.model.forward_with_q(graph, elo_norm=elo_norm)
+            if explain:
+                value, q_scores, _, x_dict = self.model.forward_with_q(
+                    graph, elo_norm=elo_norm, return_embeddings=True
+                )
+            else:
+                value, q_scores, _ = self.model.forward_with_q(graph, elo_norm=elo_norm)
+                x_dict = None
 
         q_list = q_scores.cpu().tolist()
         if len(q_list) != len(legal_moves):
@@ -173,7 +329,7 @@ class CaseTutor:
 
         if explain:
             internals = self._build_explain(
-                legal_moves, q_scores, value, graph, elo_norm
+                board, legal_moves, q_scores, value, graph, elo_norm, x_dict
             )
             return best_move, best_prob, move_scores, uncertainty, internals
 
@@ -181,11 +337,13 @@ class CaseTutor:
 
     def _build_explain(
         self,
+        board: chess.Board,
         legal_moves: list,
         q_scores: torch.Tensor,
         value: torch.Tensor,
         graph,
         elo_norm: float,
+        x_dict: dict | None = None,
     ) -> dict:
         """Build a plot-ready internals dict from a completed forward pass.
 
@@ -251,7 +409,115 @@ class CaseTutor:
             "dest_heatmap":   dest_heatmap,
             "src_heatmap":    src_heatmap,
             "elo_diff":       elo_diff,
+            # --- structural / graph-theoretic real-time fields ---
+            "structural_fingerprint": position_fingerprint(board),
+            "tension_map":      self._build_tension_map(board),
+            "pin_map":          self._build_pin_map(board),
+            "community_groups": self._build_community_groups(board),
+            "piece_centrality": self._build_piece_centrality(board),
+            # --- GNN learned embeddings ---
+            "piece_gnn_embeddings": self._build_piece_gnn_embeddings(graph, x_dict),
+            "piece_importance":     self._build_piece_importance(graph, x_dict),
         }
+
+    # ------------------------------------------------------------------
+    # Board-structural helpers used by _build_explain
+    # ------------------------------------------------------------------
+
+    @staticmethod
+    def _build_tension_map(board: chess.Board) -> list[list[float]]:
+        """8×8 float grid.  Each cell = (white_attackers + black_attackers) / 16,
+        normalised so the max sensible value (8+ attackers) caps near 1."""
+        grid = [[0.0] * 8 for _ in range(8)]
+        for sq in chess.SQUARES:
+            w = len(board.attackers(chess.WHITE, sq))
+            b = len(board.attackers(chess.BLACK, sq))
+            r, f = chess.square_rank(sq), chess.square_file(sq)
+            grid[r][f] = round(min((w + b) / 8.0, 1.0), 4)
+        return grid
+
+    @staticmethod
+    def _build_pin_map(board: chess.Board) -> list[list[bool]]:
+        """8×8 bool grid. True where a piece is absolutely pinned to its king."""
+        grid = [[False] * 8 for _ in range(8)]
+        for sq, piece in board.piece_map().items():
+            if board.is_pinned(piece.color, sq):
+                grid[chess.square_rank(sq)][chess.square_file(sq)] = True
+        return grid
+
+    @staticmethod
+    def _build_community_groups(board: chess.Board) -> list[list[str]]:
+        """Label-propagation community detection on the interaction graph.
+
+        Returns a list of groups; each group is a sorted list of square names
+        (e.g. ``["d1", "f3"]``).  Groups containing only empty squares are
+        excluded — only occupied squares appear.
+        """
+        G = _interaction_graph(board)
+        if G.number_of_nodes() == 0:
+            return []
+        U = G.to_undirected()
+        communities = nx.algorithms.community.label_propagation_communities(U)
+        return [sorted(chess.square_name(n) for n in group) for group in communities]
+
+    @staticmethod
+    def _build_piece_centrality(board: chess.Board) -> dict[str, float]:
+        """Degree centrality of every occupied square in the interaction graph.
+
+        Returns ``{square_name: centrality}`` for all occupied squares.
+        Centrality close to 1 means the piece interacts with almost all others.
+        """
+        G = _interaction_graph(board)
+        if G.number_of_nodes() == 0:
+            return {}
+        dc = nx.degree_centrality(G)
+        return {chess.square_name(sq): round(c, 6) for sq, c in dc.items()}
+
+    @staticmethod
+    def _build_piece_gnn_embeddings(
+        graph,
+        x_dict: dict | None,
+    ) -> dict[str, list[float]]:
+        """Map each occupied square to its GNN piece embedding vector.
+
+        Uses the ``(piece, on, square)`` edge index to recover which piece
+        node corresponds to which square, then returns the embedding as a
+        plain Python list for JSON serialisation.
+
+        Returns an empty dict when ``x_dict`` is None (explain=False path).
+        """
+        if x_dict is None or 'piece' not in x_dict:
+            return {}
+        on_ei = graph['piece', 'on', 'square'].edge_index  # [2, N_pieces]
+        piece_emb = x_dict['piece'].detach().cpu()          # [N_pieces, H]
+        result: dict[str, list[float]] = {}
+        for p_idx, sq_idx in zip(on_ei[0].tolist(), on_ei[1].tolist()):
+            sq_name = chess.square_name(int(sq_idx))
+            result[sq_name] = [round(v, 5) for v in piece_emb[p_idx].tolist()]
+        return result
+
+    @staticmethod
+    def _build_piece_importance(
+        graph,
+        x_dict: dict | None,
+    ) -> dict[str, float]:
+        """Normalised L2 norm of each piece's GNN embedding — a proxy for
+        how much the model focuses on this piece.
+
+        Values are normalised so the most important piece scores 1.0.
+        Returns an empty dict when ``x_dict`` is None.
+        """
+        if x_dict is None or 'piece' not in x_dict:
+            return {}
+        on_ei = graph['piece', 'on', 'square'].edge_index
+        piece_emb = x_dict['piece'].detach().cpu()
+        norms = piece_emb.norm(dim=1)                       # [N_pieces]
+        max_norm = norms.max().item() or 1.0
+        result: dict[str, float] = {}
+        for p_idx, sq_idx in zip(on_ei[0].tolist(), on_ei[1].tolist()):
+            sq_name = chess.square_name(int(sq_idx))
+            result[sq_name] = round(norms[p_idx].item() / max_norm, 6)
+        return result
 
     @staticmethod
     def _extract_scalar(step_output) -> float:
@@ -399,8 +665,20 @@ class CaseTutor:
         # Accumulated heatmaps (raw, normalised later)
         acc_dest = [[0.0] * 8 for _ in range(8)]
         acc_src  = [[0.0] * 8 for _ in range(8)]
+        # Structural / graph-theoretic trajectories
+        coordination_traj: list[float] = []
+        centrality_traj:   list[float] = []
+        community_traj:    list[int]   = []
+        tension_traj:      list[float] = []
+        pin_count_traj:    list[int]   = []
+        fork_count_traj:   list[int]   = []
+        fingerprint_traj:  list[list[float]] = []
+        structural_drift_traj: list[float] = []
+        # GNN piece importance per position: list[{sq_name: importance}]
+        piece_importance_traj: list[dict[str, float]] = []
 
         cache = None
+        previous_fingerprint: list[float] | None = None
         for fen in fens:
             board = chess.Board(fen)
             legal_moves = list(board.legal_moves)
@@ -411,8 +689,9 @@ class CaseTutor:
             elo_norm = elo_w if board.turn == chess.WHITE else elo_b
             graph = self.builder.fen_to_graph(fen).to(self.device)
             with torch.no_grad():
-                value, q_scores, _, cache = self.model.forward_with_q(
-                    graph, cache=cache, elo_norm=elo_norm, return_cache=True
+                value, q_scores, _, cache, x_dict = self.model.forward_with_q(
+                    graph, cache=cache, elo_norm=elo_norm,
+                    return_cache=True, return_embeddings=True,
                 )
 
             eval_traj.append(round(float(value.item()), 6))
@@ -460,6 +739,35 @@ class CaseTutor:
                 sf = chess.square_file(move.from_square)
                 acc_dest[dr][df] += p
                 acc_src[sr][sf]  += p
+
+            # Structural / graph-theoretic metrics
+            interaction_graph = _interaction_graph(board)
+            struct = _structural_metrics(board, graph=interaction_graph)
+            is_white = board.turn == chess.WHITE
+            coordination_traj.append(
+                struct["white_coordination"] if is_white else struct["black_coordination"]
+            )
+            centrality_traj.append(
+                struct["white_mean_centrality"] if is_white else struct["black_mean_centrality"]
+            )
+            community_traj.append(struct["community_count"])
+            tension_traj.append(round(struct["modularity_proxy"], 6))
+
+            tactics = _detect_tactics(board)
+            pin_count_traj.append(len(tactics["pins"]))
+            fork_count_traj.append(len(tactics["forks"]))
+
+            fingerprint = position_fingerprint(board, graph=interaction_graph)
+            fingerprint_traj.append(fingerprint)
+            if previous_fingerprint is None:
+                structural_drift_traj.append(0.0)
+            else:
+                local_drift = 1.0 - fingerprint_similarity(previous_fingerprint, fingerprint)
+                structural_drift_traj.append(round(local_drift, 6))
+            previous_fingerprint = fingerprint
+
+            # GNN piece importance (L2 norm of piece embeddings, normalised)
+            piece_importance_traj.append(self._build_piece_importance(graph, x_dict))
 
         n = len(eval_traj)
 
@@ -560,6 +868,20 @@ class CaseTutor:
             )
             decisiveness = round(1.0 - sign_flips / max(len(diffs) - 1, 1), 4)
 
+        # Structural game-level aggregates
+        avg_coordination = round(sum(coordination_traj) / n, 4) if n else 0.0
+        avg_centrality   = round(sum(centrality_traj) / n, 4) if n else 0.0
+        avg_tension      = round(sum(tension_traj) / n, 4) if n else 0.0
+        peak_forks       = max(fork_count_traj) if fork_count_traj else 0
+        peak_pins        = max(pin_count_traj) if pin_count_traj else 0
+        avg_structural_drift = round(sum(structural_drift_traj) / n, 4) if n else 0.0
+        peak_structural_drift = round(max(structural_drift_traj), 4) if structural_drift_traj else 0.0
+        final_structural_distance = (
+            round(1.0 - fingerprint_similarity(fingerprint_traj[0], fingerprint_traj[-1]), 4)
+            if len(fingerprint_traj) >= 2
+            else 0.0
+        )
+
         # Territory: share of accumulated dest probability by board half
         total_dest_mass = sum(acc_dest[r][f] for r in range(8) for f in range(8)) or 1.0
         white_territory = round(
@@ -602,6 +924,29 @@ class CaseTutor:
             "accumulated_src_heatmap":  norm_src,
             "white_territory":   white_territory,
             "black_territory":   black_territory,
+
+            # Graph-structural trajectories
+            "coordination_trajectory":    coordination_traj,
+            "centrality_trajectory":      centrality_traj,
+            "community_count_trajectory": community_traj,
+            "tension_trajectory":         tension_traj,
+            "pin_count_trajectory":       pin_count_traj,
+            "fork_count_trajectory":      fork_count_traj,
+            "structural_fingerprint_trajectory": fingerprint_traj,
+            "structural_drift_trajectory": structural_drift_traj,
+
+            # Graph-structural game-level aggregates
+            "avg_coordination":  avg_coordination,
+            "avg_centrality":    avg_centrality,
+            "avg_tension":       avg_tension,
+            "peak_forks":        peak_forks,
+            "peak_pins":         peak_pins,
+            "avg_structural_drift": avg_structural_drift,
+            "peak_structural_drift": peak_structural_drift,
+            "final_structural_distance": final_structural_distance,
+
+            # GNN learned piece importance per position
+            "piece_importance_trajectory": piece_importance_traj,
         }
 
     def estimate_elo(self, game_stats: dict, side: str = "white") -> dict:

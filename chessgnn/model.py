@@ -127,7 +127,7 @@ class WeightedHGTConv(MessagePassing):
 # ---------------------------------------------------------------------------
 # Input feature dimensions produced by ChessGraphBuilder
 # ---------------------------------------------------------------------------
-_NODE_INPUT_DIMS: dict[str, int] = {'piece': 10, 'square': 3, 'global': 11}
+_NODE_INPUT_DIMS: dict[str, int] = {'piece': 15, 'square': 3, 'global': 11}
 
 # Maximum node counts used to pre-allocate node-GRU hidden states.
 # Piece count varies per position (≤ 32); square count is always 64.
@@ -458,6 +458,7 @@ class GATEAUChessModel(nn.Module):
         cache: KVCache | None = None,
         elo_norm: float = 1.0,
         return_cache: bool = False,
+        return_embeddings: bool = False,
     ) -> tuple:
         """
         Single-pass inference returning value and per-move Q scores.
@@ -465,21 +466,18 @@ class GATEAUChessModel(nn.Module):
         Parameters
         ----------
         return_cache : bool
-            When True, a fourth element ``KVCache`` is appended to the return
-            tuple so callers can thread temporal state through a game
-            (e.g. :meth:`CaseTutor.analyse_game`).  Default False preserves
-            the existing 3-tuple interface for all current callers.
+            When True, appends the updated ``KVCache`` to the return tuple.
+        return_embeddings : bool
+            When True, appends the final GNN ``x_dict`` to the return tuple.
+            ``x_dict['piece']`` is shaped [N_pieces, H].
 
         Returns
         -------
         value : Tensor [1, 1]
-            Win probability in [-1, 1] (tanh); +1 = white wins.
         q_scores : Tensor [M]
-            Raw Q logit for each of the M legal move edges.
         move_edge_index : Tensor [2, M]
-            Edge index (piece_src, square_dst) for each move, matching
-            the order of board.legal_moves used by ChessGraphBuilder.
         new_cache : KVCache  (only when return_cache=True)
+        x_dict : dict[str, Tensor]  (only when return_embeddings=True)
         """
         x_dict = self._encode(graph)
         feat, new_cache = self._apply_temporal(x_dict, cache)
@@ -499,9 +497,12 @@ class GATEAUChessModel(nn.Module):
         q_feats = torch.cat([h_src, h_dst, move_edge_attr, elo_expand], dim=1)  # [M, 2H+5+elo_dim]
         q_scores = self.q_head(q_feats).squeeze(-1)                             # [M]
 
+        result: list = [value, q_scores, move_edge_index]
         if return_cache:
-            return value, q_scores, move_edge_index, new_cache
-        return value, q_scores, move_edge_index
+            result.append(new_cache)
+        if return_embeddings:
+            result.append(x_dict)
+        return tuple(result)
 
     # ------------------------------------------------------------------
     # Public API — sequence (training)

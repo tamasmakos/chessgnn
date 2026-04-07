@@ -102,6 +102,9 @@ class TestAnalyseGameStructure:
             "avg_branching", "game_sharpness",
             "accumulated_dest_heatmap", "accumulated_src_heatmap",
             "white_territory", "black_territory",
+            "structural_fingerprint_trajectory", "structural_drift_trajectory",
+            "avg_structural_drift", "peak_structural_drift",
+            "final_structural_distance",
         }
         assert required.issubset(stats.keys())
 
@@ -308,3 +311,346 @@ class TestEstimateElo:
     def test_json_serialisable(self, tutor, stats) -> None:
         result = tutor.estimate_elo(stats, "white")
         json.dumps(result)
+
+
+# ---------------------------------------------------------------------------
+# Structural trajectories (new graph-theoretic features)
+# ---------------------------------------------------------------------------
+
+class TestStructuralTrajectories:
+    """Verify the six new per-position structural trajectory keys."""
+
+    _TRAJ_KEYS = (
+        "coordination_trajectory",
+        "centrality_trajectory",
+        "community_count_trajectory",
+        "tension_trajectory",
+        "pin_count_trajectory",
+        "fork_count_trajectory",
+    )
+
+    def test_structural_keys_present(self, stats: dict) -> None:
+        for key in self._TRAJ_KEYS:
+            assert key in stats, f"Missing key: {key}"
+
+    def test_structural_trajectory_lengths(self, stats: dict) -> None:
+        n = stats["n_positions"]
+        for key in self._TRAJ_KEYS:
+            assert len(stats[key]) == n, f"{key} length mismatch"
+
+    def test_coordination_in_range(self, stats: dict) -> None:
+        for v in stats["coordination_trajectory"]:
+            assert 0.0 <= v <= 1.0, f"coordination {v} out of [0, 1]"
+
+    def test_centrality_in_range(self, stats: dict) -> None:
+        for v in stats["centrality_trajectory"]:
+            assert 0.0 <= v <= 1.0, f"centrality {v} out of [0, 1]"
+
+    def test_community_count_positive(self, stats: dict) -> None:
+        for v in stats["community_count_trajectory"]:
+            assert isinstance(v, int) and v >= 1, f"community_count {v} invalid"
+
+    def test_tension_in_range(self, stats: dict) -> None:
+        for v in stats["tension_trajectory"]:
+            assert 0.0 <= v <= 1.0, f"tension {v} out of [0, 1]"
+
+    def test_pin_count_nonnegative(self, stats: dict) -> None:
+        for v in stats["pin_count_trajectory"]:
+            assert isinstance(v, int) and v >= 0
+
+    def test_fork_count_nonnegative(self, stats: dict) -> None:
+        for v in stats["fork_count_trajectory"]:
+            assert isinstance(v, int) and v >= 0
+
+    # Game-level aggregates
+    def test_aggregate_keys_present(self, stats: dict) -> None:
+        for key in ("avg_coordination", "avg_centrality", "avg_tension",
+                    "peak_forks", "peak_pins"):
+            assert key in stats, f"Missing aggregate key: {key}"
+
+    def test_avg_coordination_in_range(self, stats: dict) -> None:
+        assert 0.0 <= stats["avg_coordination"] <= 1.0
+
+    def test_avg_centrality_in_range(self, stats: dict) -> None:
+        assert 0.0 <= stats["avg_centrality"] <= 1.0
+
+    def test_peak_forks_int(self, stats: dict) -> None:
+        assert isinstance(stats["peak_forks"], int) and stats["peak_forks"] >= 0
+
+    def test_peak_pins_int(self, stats: dict) -> None:
+        assert isinstance(stats["peak_pins"], int) and stats["peak_pins"] >= 0
+
+    def test_structural_json_serialisable(self, stats: dict) -> None:
+        """New keys must contain only JSON-safe types."""
+        subset = {k: stats[k] for k in self._TRAJ_KEYS}
+        json.dumps(subset)
+
+
+class TestStructuralFingerprints:
+    def test_fingerprint_trajectory_present(self, stats: dict) -> None:
+        assert "structural_fingerprint_trajectory" in stats
+
+    def test_fingerprint_trajectory_length(self, stats: dict) -> None:
+        assert len(stats["structural_fingerprint_trajectory"]) == stats["n_positions"]
+
+    def test_fingerprint_dimensions_stable(self, stats: dict) -> None:
+        traj = stats["structural_fingerprint_trajectory"]
+        assert traj
+        expected_dim = len(traj[0])
+        assert expected_dim > 0
+        for vector in traj:
+            assert len(vector) == expected_dim
+
+    def test_fingerprint_components_in_range(self, stats: dict) -> None:
+        for vector in stats["structural_fingerprint_trajectory"]:
+            for value in vector:
+                assert 0.0 <= value <= 1.0
+
+    def test_structural_drift_trajectory_present(self, stats: dict) -> None:
+        assert "structural_drift_trajectory" in stats
+
+    def test_structural_drift_length(self, stats: dict) -> None:
+        assert len(stats["structural_drift_trajectory"]) == stats["n_positions"]
+
+    def test_first_structural_drift_zero(self, stats: dict) -> None:
+        assert stats["structural_drift_trajectory"][0] == pytest.approx(0.0, abs=1e-6)
+
+    def test_structural_drift_in_range(self, stats: dict) -> None:
+        for value in stats["structural_drift_trajectory"]:
+            assert 0.0 <= value <= 1.0
+
+    def test_structural_drift_aggregates_in_range(self, stats: dict) -> None:
+        assert 0.0 <= stats["avg_structural_drift"] <= 1.0
+        assert 0.0 <= stats["peak_structural_drift"] <= 1.0
+        assert 0.0 <= stats["final_structural_distance"] <= 1.0
+
+    def test_fingerprint_json_serialisable(self, stats: dict) -> None:
+        subset = {
+            "structural_fingerprint_trajectory": stats["structural_fingerprint_trajectory"],
+            "structural_drift_trajectory": stats["structural_drift_trajectory"],
+            "avg_structural_drift": stats["avg_structural_drift"],
+            "peak_structural_drift": stats["peak_structural_drift"],
+            "final_structural_distance": stats["final_structural_distance"],
+        }
+        json.dumps(subset)
+
+
+class TestBuildExplainFingerprint:
+    @pytest.fixture(scope="class")
+    def explain_dict(self, tutor, game_data):
+        fens, _ = game_data
+        _, _, _, _, internals = tutor.recommend_move(fens[0], explain=True)
+        return internals
+
+    def test_structural_fingerprint_present(self, explain_dict: dict) -> None:
+        assert "structural_fingerprint" in explain_dict
+
+    def test_structural_fingerprint_nonempty(self, explain_dict: dict) -> None:
+        fp = explain_dict["structural_fingerprint"]
+        assert isinstance(fp, list)
+        assert len(fp) > 0
+
+    def test_structural_fingerprint_range(self, explain_dict: dict) -> None:
+        for value in explain_dict["structural_fingerprint"]:
+            assert 0.0 <= value <= 1.0
+
+
+# ---------------------------------------------------------------------------
+# Module-level tactical helpers
+# ---------------------------------------------------------------------------
+
+class TestDetectTactics:
+    """Unit tests for _detect_tactics() on known tactical positions."""
+
+    def test_returns_expected_keys(self) -> None:
+        from tutor import _detect_tactics
+        board = chess.Board()  # start position: no tactics
+        result = _detect_tactics(board)
+        assert set(result.keys()) == {
+            "pins", "forks", "tension_squares", "overloaded_squares",
+            "contested_count",
+        }
+
+    def test_start_position_no_pins_no_forks(self) -> None:
+        from tutor import _detect_tactics
+        result = _detect_tactics(chess.Board())
+        assert result["pins"] == []
+        assert result["forks"] == []
+
+    def test_start_position_no_tension(self) -> None:
+        from tutor import _detect_tactics
+        # In the start position no piece of either side can reach the other
+        result = _detect_tactics(chess.Board())
+        assert result["contested_count"] == 0
+
+    def test_pin_detected(self) -> None:
+        """e3-bishop pins the d4-knight to the e1-king (Ruy López-style fixture)."""
+        from tutor import _detect_tactics
+        # Place white king e1, white knight d4; black bishop on h7 diagonally
+        # pinning the knight to the king via the f5-g6-h7 diagonal is complex.
+        # Use a well-known simple absolute pin instead:
+        # White Ke1, Rd1; Black Qd8 — pin the rook along d-file to the king.
+        # Actually simplest: construct a position where is_pinned() fires.
+        # Fen: White Ke1 Ra1; Black Qa8 - rook is pinned along a-file? No.
+        # Use: White Ke1, Bf3; Black Qh5 pins nothing.
+        # Most reliable: 8/8/8/8/3r4/8/3R4/3K4 w - - 0 1
+        # White Kd1, Rd2; Black Rd4 — Rd2 is pinned to Kd1 by Rd4.
+        board = chess.Board("8/8/8/8/3r4/8/3R4/3K4 w - - 0 1")
+        result = _detect_tactics(board)
+        assert "d2" in result["pins"], f"Expected d2 pinned, got {result['pins']}"
+
+    def test_fork_detected(self) -> None:
+        """Knight on e5 attacks c4-rook and g4-queen (both higher-value than knight)."""
+        from tutor import _detect_tactics
+        # White knight e5; Black rook c4 (val=5), black queen g4 (val=9)
+        # Knight value = 3; both victims strictly exceed it → fork fires.
+        board = chess.Board("8/8/8/4N3/2r3q1/8/8/8 w - - 0 1")
+        result = _detect_tactics(board)
+        attacker_squares = {f["attacker"] for f in result["forks"]}
+        assert "e5" in attacker_squares, f"Expected e5 fork, got {result['forks']}"
+
+    def test_tension_squares_detected(self) -> None:
+        """After 1.e4 e5 2.Nf3, d5/e4/e5 squares should be contested."""
+        from tutor import _detect_tactics
+        board = chess.Board()
+        board.push_san("e4")
+        board.push_san("e5")
+        result = _detect_tactics(board)
+        assert result["contested_count"] > 0, "Expected contested squares after e4 e5"
+
+    def test_json_serialisable(self) -> None:
+        from tutor import _detect_tactics
+        board = chess.Board()
+        board.push_san("e4")
+        board.push_san("e5")
+        json.dumps(_detect_tactics(board))
+
+
+# ---------------------------------------------------------------------------
+# _build_explain structural fields
+# ---------------------------------------------------------------------------
+
+class TestBuildExplainStructural:
+    """Verify _build_explain returns the four new structural fields."""
+
+    @pytest.fixture(scope="class")
+    def explain_dict(self, tutor, game_data):
+        fens, _ = game_data
+        board = chess.Board(fens[0])
+        legal_moves = list(board.legal_moves)
+        # Use recommend_move with explain=True
+        _, _, _, _, internals = tutor.recommend_move(fens[0], explain=True)
+        return internals
+
+    def test_tension_map_present(self, explain_dict: dict) -> None:
+        assert "tension_map" in explain_dict
+
+    def test_tension_map_shape(self, explain_dict: dict) -> None:
+        t = explain_dict["tension_map"]
+        assert len(t) == 8
+        for row in t:
+            assert len(row) == 8
+
+    def test_tension_map_range(self, explain_dict: dict) -> None:
+        for row in explain_dict["tension_map"]:
+            for v in row:
+                assert 0.0 <= v <= 1.0, f"tension_map value {v} out of [0, 1]"
+
+    def test_pin_map_shape(self, explain_dict: dict) -> None:
+        p = explain_dict["pin_map"]
+        assert len(p) == 8
+        for row in p:
+            assert len(row) == 8
+
+    def test_pin_map_start_all_false(self, explain_dict: dict) -> None:
+        # No pieces are pinned in the starting position
+        for row in explain_dict["pin_map"]:
+            for cell in row:
+                assert cell is False
+
+    def test_community_groups_is_list(self, explain_dict: dict) -> None:
+        assert isinstance(explain_dict["community_groups"], list)
+
+    def test_community_groups_nonempty(self, explain_dict: dict) -> None:
+        # Starting position has 32 pieces → at least 1 community
+        assert len(explain_dict["community_groups"]) >= 1
+
+    def test_piece_centrality_is_dict(self, explain_dict: dict) -> None:
+        assert isinstance(explain_dict["piece_centrality"], dict)
+
+    def test_piece_centrality_values_in_range(self, explain_dict: dict) -> None:
+        for sq, c in explain_dict["piece_centrality"].items():
+            assert 0.0 <= c <= 1.0, f"{sq}: centrality {c} out of [0, 1]"
+
+    def test_explain_json_serialisable(self, explain_dict: dict) -> None:
+        json.dumps(explain_dict)
+
+
+# ---------------------------------------------------------------------------
+# GNN piece embeddings in _build_explain (new keys)
+# ---------------------------------------------------------------------------
+
+class TestBuildExplainGNNEmbeddings:
+    """Verify piece_gnn_embeddings and piece_importance in _build_explain."""
+
+    @pytest.fixture(scope="class")
+    def explain_dict(self, tutor, game_data):
+        fens, _ = game_data
+        _, _, _, _, internals = tutor.recommend_move(fens[0], explain=True)
+        return internals
+
+    def test_piece_gnn_embeddings_present(self, explain_dict):
+        assert "piece_gnn_embeddings" in explain_dict
+
+    def test_piece_gnn_embeddings_is_dict(self, explain_dict):
+        assert isinstance(explain_dict["piece_gnn_embeddings"], dict)
+
+    def test_piece_gnn_embeddings_nonempty(self, explain_dict):
+        assert len(explain_dict["piece_gnn_embeddings"]) > 0
+
+    def test_piece_gnn_embeddings_values_are_lists(self, explain_dict):
+        for sq, emb in explain_dict["piece_gnn_embeddings"].items():
+            assert isinstance(emb, list), f"{sq}: expected list, got {type(emb)}"
+            assert len(emb) > 0
+
+    def test_piece_importance_present(self, explain_dict):
+        assert "piece_importance" in explain_dict
+
+    def test_piece_importance_is_dict(self, explain_dict):
+        assert isinstance(explain_dict["piece_importance"], dict)
+
+    def test_piece_importance_in_range(self, explain_dict):
+        for sq, v in explain_dict["piece_importance"].items():
+            assert 0.0 <= v <= 1.0, f"{sq}: importance {v} out of [0, 1]"
+
+    def test_piece_importance_has_max_one(self, explain_dict):
+        vals = list(explain_dict["piece_importance"].values())
+        if vals:
+            assert max(vals) == pytest.approx(1.0, abs=1e-4)
+
+    def test_explain_gnn_json_serialisable(self, explain_dict):
+        json.dumps(explain_dict)
+
+
+# ---------------------------------------------------------------------------
+# piece_importance_trajectory in analyse_game
+# ---------------------------------------------------------------------------
+
+class TestPieceImportanceTrajectory:
+    def test_key_present(self, stats):
+        assert "piece_importance_trajectory" in stats
+
+    def test_length_matches_n_positions(self, stats):
+        assert len(stats["piece_importance_trajectory"]) == stats["n_positions"]
+
+    def test_each_entry_is_dict(self, stats):
+        for i, d in enumerate(stats["piece_importance_trajectory"]):
+            assert isinstance(d, dict), f"Position {i}: expected dict"
+
+    def test_values_in_range(self, stats):
+        for i, d in enumerate(stats["piece_importance_trajectory"]):
+            for sq, v in d.items():
+                assert 0.0 <= v <= 1.0, f"Position {i}, {sq}: {v} out of [0,1]"
+
+    def test_json_serialisable(self, stats):
+        json.dumps(stats["piece_importance_trajectory"])
