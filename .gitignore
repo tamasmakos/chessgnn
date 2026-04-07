@@ -6,6 +6,17 @@ output/game_labels_5k_d8.jsonl
 __pycache__
 input
 memory-bank
+.claw/
+.openclaw/
+.vscode/
+AGENTS.md
+BOOTSTRAP.md
+HEARTBEAT.md
+IDENTITY.md
+MEMORY.md
+SOUL.md
+TOOLS.md
+USER.md
 .github/*
 !.github/workflows/
 .pytest_cache
