@@ -1,6 +1,8 @@
 legacy
 stockfish
 .env
+output/game_labels_10k_d8.jsonl
+output/game_labels_5k_d8.jsonl
 __pycache__
 agent
 input
