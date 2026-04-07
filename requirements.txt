@@ -8,7 +8,7 @@ node2vec
 scikit-learn
 groq
 leidenalg
-torch
+torch>=2.11,<2.12
 torch_geometric
 opencv-python-headless
 numpy

@@ -8,5 +8,4 @@ input
 memory-bank
 .github/*
 !.github/workflows/
-!.github/workflows/*.yml
 .pytest_cache
