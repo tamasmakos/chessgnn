@@ -243,6 +243,11 @@ class TestPerSideStats:
         for side in ("white", "black"):
             assert isinstance(stats[side]["blunders"], list)
 
+    def test_best_moves_are_top_ranked(self, stats: dict) -> None:
+        for side in ("white", "black"):
+            for move in stats[side]["best_moves"]:
+                assert move["rank"] == 1
+
     def test_blunder_eval_drop_threshold(self, stats: dict) -> None:
         for side in ("white", "black"):
             for b in stats[side]["blunders"]:
@@ -651,6 +656,13 @@ class TestPieceImportanceTrajectory:
         for i, d in enumerate(stats["piece_importance_trajectory"]):
             for sq, v in d.items():
                 assert 0.0 <= v <= 1.0, f"Position {i}, {sq}: {v} out of [0,1]"
+
+    def test_contains_non_constant_position(self, stats):
+        assert any(
+            len({round(v, 6) for v in d.values()}) > 1
+            for d in stats["piece_importance_trajectory"]
+            if d
+        )
 
     def test_json_serialisable(self, stats):
         json.dumps(stats["piece_importance_trajectory"])

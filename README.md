@@ -364,15 +364,18 @@ chessgnn/
 └── visualizer.py              # Win-probability video generation
 
 agent/
-├── core.py               # LLM coaching agent
-├── llm.py                # LLM provider abstraction (Groq)
-├── schema.py             # Pydantic schemas
-└── tools.py              # Agent tools (move explanation, etc.)
+├── core.py               # Pydantic-AI chess coach agent (interactive Q&A, requires pydantic_ai)
+├── narrator.py           # GameNarrator — direct Groq calls, one per report section
+├── prompts.py            # Grounded prompt template functions
+├── schema.py             # GameContext / CoachingSession Pydantic models
+└── tools.py              # Agent tools: get_game_summary, explain_critical_moves, etc.
 
 train.py                  # Baseline pretraining (PGN game outcomes)
 distill_train.py          # Distillation training (Stockfish labels, dual loss)
 run_experiment.py         # Scaling sweep runner — reads JSON config, logs to CSV
 tutor.py                  # CaseTutor — stateful inference with uncertainty
+show_analytics.py         # Terminal analytics report (numeric, no LLM)
+coach.py                  # Coached report — analytics + LLM narration interleaved
 uci_engine.py             # UCI wrapper for engine gauntlets and GUIs
 calibrate.py              # CLI: fit TemperatureScaler and save .calib.json sidecar
 
@@ -399,6 +402,172 @@ input/                    # PGN datasets and Lichess puzzle CSV
 output/                   # Checkpoints, JSONL labels, .calib.json sidecars, reliability PNGs
 stockfish/src/stockfish   # Bundled Stockfish binary (Linux)
 ```
+
+---
+
+## Chess Coach — Natural Language Analysis
+
+`coach.py` wraps the analytics pipeline with an LLM-powered chess coach (Groq / Llama-4).  
+Every section of the report gets a coaching paragraph immediately after its numbers, turning the analytics into plain English a club player can act on. A **step-by-step move analysis** calls the LLM for every notable move (blunders, mistakes, tactical positions, best moves with alternatives).
+
+### Usage
+
+```bash
+# Set your Groq API key (and optionally select a model)
+export GROQ_API_KEY=gsk_...
+export GROQ_MODEL=meta-llama/llama-4-scout-17b-16e-instruct   # optional
+
+# Analyse game 1 from the default PGN
+python coach.py \
+  --model output/gateau_medium_h192_l5_elo1600_hybrid_smoke.pt \
+  --calib output/gateau_medium_h192_l5_elo1600_hybrid_smoke.pt.calib.json \
+  --game 1 --device cpu
+
+# Or analyse a Lichess game directly
+python coach.py \
+  --model output/gateau_medium_h192_l5_elo1600_hybrid_smoke.pt \
+  --lichess-game https://lichess.org/j1dkb5dw
+```
+
+All flags are identical to `show_analytics.py`. Without `GROQ_API_KEY` the numeric tables still print in full; only the coaching paragraphs are omitted.
+
+### Sample Output
+
+```
+╔══════════════════════════════════════════════════════════╗
+║         ChessGNN · Coached Game Analysis Report          ║
+╚══════════════════════════════════════════════════════════╝
+  BFG9k (1639) ⬜  vs  ⬛ mamalak (1403)
+  French Defense: Normal Variation
+  Result: 1-0   |   25 plies analysed (~13 full moves)
+  LLM coaching: meta-llama/llama-4-scout-17b-16e-instruct
+
+  [Coach — Overview]
+  | In this game, BFG9k (White) played a steady and positional
+  | game against mamalak (Black), gradually building and
+  | maintaining a small advantage throughout. White controlled
+  | the position, making strategic decisions that ultimately led
+  | to a win, while Black's chances were limited to counterplay.
+
+────────────────────────────────────────────────────────────
+  EVALUATION TRAJECTORY  (▁ = black winning  ▇ = white winning)
+
+  ▄▄▅▅▅▅▅▅▅▅▅▅▅▅▅▅▅▅▅▅▅▅▅▅▅
+  1 2 3 4 5 6 7 8 9 10 11 12 13
+
+  Start eval : +0.048  (±0 = equal)
+  Last analysed eval : +0.215  (white advantage)
+  Terminal outcome   : checkmate, white won
+  Sharpness  : 0.032  (stable game)
+  Lead stability: 1.00  (one side kept the edge)
+
+────────────────────────────────────────────────────────────
+  MOVE QUALITY SUMMARY
+
+  ⬜ BFG9k
+    Accuracy  : ██████████████░░░░░░  71%
+    Top-1 match: 15%  Top-3 match: 23%
+    Blunders  : 0   Mistakes: 0   Best moves: 2
+    Est. ELO  : 958  [658–1258]
+
+  ⬛ mamalak
+    Accuracy  : ███████████░░░░░░░░░  55%
+    Top-1 match: 8%   Top-3 match: 25%
+    Blunders  : 0   Mistakes: 0   Best moves: 1
+    Est. ELO  : 400  [100–700]
+
+  [Coach]
+  | BFG9k played with 71% accuracy and a blunder-free game.
+  | mamalak's 55% accuracy and low top-1 agreement (8%) suggest
+  | they were often choosing reasonable but suboptimal moves.
+  | Focus on developing pieces to active squares and improving
+  | recognition of tactical patterns such as pins and forks.
+
+────────────────────────────────────────────────────────────
+  STEP-BY-STEP MOVE ANALYSIS
+
+  (Coach comments on key moments — blunders, mistakes,
+   tactical positions, and best moves with alternatives)
+
+  Move 11 (Black) — Kd8 ◆ Tactical
+  Rank: 33/38  14% of moves beaten
+  Eval drop: +0.049
+  Alternatives: Bxa3 (+0.11)  |  Bxe4 (+0.06)  |  Qxh5 (+0.06)
+  > With 11...Kd8, your king is somewhat safer, but it's worth
+  > noting that this move doesn't address the pins on f2 and f7,
+  > nor does it alleviate the overload on e8 and f3. Consider
+  > whether capturing on a3 or playing Qxh5 might offer a better
+  > chance to equalize.
+
+  Move 12 (White) — Qxf7 ◆ Tactical
+  Rank: 2/41  98% of moves beaten
+  Eval drop: +0.028
+  Alternatives: Bxf7+ (+0.11)  |  Qxf7 (+0.09)  |  e5 (+0.03)
+  > Qxf7 is a strong move (98th percentile), but consider whether
+  > Bxf7+ could be even more precise — a bishop recapture keeps
+  > the queen more centralised while still exploiting the pin on f2.
+
+────────────────────────────────────────────────────────────
+  CRITICAL MOMENTS & TACTICAL PATTERNS
+
+  Tactical density : 24% of positions (6/25) had active motifs
+  Peak pins: 2   Peak forks: 0
+
+  Move  Motif                                   Played    Result
+  ────────────────────────────────────────────────────────────
+   10b  Pin: f7; Overloaded: e8, d1             Qxh4      +0.02
+   11w  Pin: f2, f7; Overloaded: e8, d1         Qf3       +0.02
+   11b  Pin: f2, f7; Overloaded: e8, f3         Kd8       +0.05
+   12w  Pin: f2; Overloaded: f3                 Qxf7      +0.03
+   12b  Pin: f2                                 Nc6       +0.04
+   13w  Pin: f2                                 Qe8#
+
+  [Coach]
+  | Pins were a recurring theme in moves 10–12. On several
+  | occasions Black's pieces were pinned against their king
+  | while White's defenders were overloaded. White eventually
+  | exploited this with Qxf7 on move 12, winning a pawn and
+  | steering toward the decisive Qe8#.
+
+────────────────────────────────────────────────────────────
+  PIECE IMPORTANCE TRAJECTORY
+
+  Square    Sparkline                                     Avg    Var  @peak
+  ────────────────────────────────────────────────────────────────────
+  h4                          ▂  █ █                     0.76  0.119     22
+  f7         ▅ ▃ ▂ ▁ ▂ ▂ ▁ ▁ ▁      █                    0.38  0.090     25
+  h7         ▇ ▃ ▂ ▂                                     0.28  0.083      2
+  g7         ▄ ▂ ▁ ▁ ▇                                   0.56  0.078     10
+  d1          ▆ █ █ ▅ █ ▃ ▃ ▂ ▂ ▅                        0.65  0.074      5
+  f3                        ▄     █                      0.73  0.070     23
+
+  Most volatile piece : h4  (var=0.119)
+  Most frequently #1  : f8  (5 positions)
+
+────────────────────────────────────────────────────────────
+  PLAYER PROFILES & COACHING INSIGHTS
+
+  ⬛ mamalak
+  [Coach]
+  | Mamalak, your low blunder rate is a solid foundation.
+  | Your accuracy and engine-agreement stats suggest you are
+  | choosing reasonable moves but missing stronger continuations.
+  | Practise tactical puzzles focusing on pins and overloaded
+  | defenders — the positions in this game repeatedly offered
+  | those motifs and they went unexploited.
+
+════════════════════════════════════════════════════════════
+```
+
+### Architecture
+
+| Component | File | Role |
+|-----------|------|------|
+| `GameNarrator` | `agent/narrator.py` | Direct Groq calls, one per report section; graceful degradation without API key |
+| Prompt templates | `agent/prompts.py` | Grounded prompt functions — data is injected, hallucination is blocked by instruction |
+| Pydantic-AI tools | `agent/tools.py` | `get_game_summary`, `get_opening_context`, `explain_critical_moves`, `get_piece_activity`, `get_player_profile`, `get_move_detail` |
+| Interactive agent | `agent/core.py` | `Agent[CoachingSession, str]` — for future Q&A mode (requires `pydantic_ai`) |
+| CLI report | `coach.py` | One-shot interleaved report; all flags identical to `show_analytics.py` |
 
 ---
 

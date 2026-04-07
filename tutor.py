@@ -286,7 +286,10 @@ class CaseTutor:
     ):
         """Single-pass move ranking via Q-head."""
         graph = self.builder.fen_to_graph(fen).to(self.device)
-        _has_dual = hasattr(self.model, 'forward_with_q_dual')
+        _has_dual = (
+            hasattr(self.model, 'forward_with_q_dual')
+            and getattr(self.model, 'has_trained_human_q_head', True)
+        )
         with torch.no_grad():
             if explain:
                 if _has_dual:
@@ -433,7 +436,12 @@ class CaseTutor:
             "piece_centrality": self._build_piece_centrality(board),
             # --- GNN learned embeddings ---
             "piece_gnn_embeddings": self._build_piece_gnn_embeddings(graph, x_dict),
-            "piece_importance":     self._build_piece_importance(graph, x_dict),
+            "piece_importance":     self._build_piece_importance(
+                graph,
+                x_dict,
+                q_scores=q_scores,
+                legal_moves=legal_moves,
+            ),
         }
 
     # ------------------------------------------------------------------
@@ -543,23 +551,41 @@ class CaseTutor:
     def _build_piece_importance(
         graph,
         x_dict: dict | None,
+        q_scores: torch.Tensor | None = None,
+        legal_moves: list | None = None,
     ) -> dict[str, float]:
-        """Normalised L2 norm of each piece's GNN embedding — a proxy for
-        how much the model focuses on this piece.
+        """Normalised per-piece move-probability mass.
 
-        Values are normalised so the most important piece scores 1.0.
-        Returns an empty dict when ``x_dict`` is None.
+        When move probabilities are available, aggregate the Q-softmax mass of
+        all legal moves originating from each piece. This is more informative
+        than using post-LayerNorm embedding norms, which are nearly constant.
+
+        Falls back to an embedding-similarity proxy when move scores are not
+        available. Values are normalised so the largest score is 1.0.
         """
+        if q_scores is not None and legal_moves is not None:
+            probs = torch.softmax(q_scores.detach(), dim=0).cpu().tolist()
+            by_square: dict[str, float] = {}
+            for move, prob in zip(legal_moves, probs):
+                sq_name = chess.square_name(move.from_square)
+                by_square[sq_name] = by_square.get(sq_name, 0.0) + float(prob)
+            max_prob = max(by_square.values(), default=0.0) or 1.0
+            return {
+                sq_name: round(prob / max_prob, 6)
+                for sq_name, prob in by_square.items()
+            }
+
         if x_dict is None or 'piece' not in x_dict:
             return {}
         on_ei = graph['piece', 'on', 'square'].edge_index
         piece_emb = x_dict['piece'].detach().cpu()
-        norms = piece_emb.norm(dim=1)                       # [N_pieces]
-        max_norm = norms.max().item() or 1.0
+        pooled = piece_emb.mean(dim=0, keepdim=True)
+        scores = torch.abs(torch.sum(piece_emb * pooled, dim=1))
+        max_score = scores.max().item() or 1.0
         result: dict[str, float] = {}
         for p_idx, sq_idx in zip(on_ei[0].tolist(), on_ei[1].tolist()):
             sq_name = chess.square_name(int(sq_idx))
-            result[sq_name] = round(norms[p_idx].item() / max_norm, 6)
+            result[sq_name] = round(scores[p_idx].item() / max_score, 6)
         return result
 
     @staticmethod
@@ -706,7 +732,10 @@ class CaseTutor:
         # Q distributions for move attribution: sorted (uci, prob) best-first
         q_dists: list[list[tuple[str, float]]] = []
         # Human Q distributions (None when model lacks human_q_head)
-        _has_dual = hasattr(self.model, 'forward_with_q_dual')
+        _has_dual = (
+            hasattr(self.model, 'forward_with_q_dual')
+            and getattr(self.model, 'has_trained_human_q_head', True)
+        )
         human_q_dists: list[list[tuple[str, float]]] | None = [] if _has_dual else None
         # Accumulated heatmaps (raw, normalised later)
         acc_dest = [[0.0] * 8 for _ in range(8)]
@@ -830,7 +859,14 @@ class CaseTutor:
             previous_fingerprint = fingerprint
 
             # GNN piece importance (L2 norm of piece embeddings, normalised)
-            piece_importance_traj.append(self._build_piece_importance(graph, x_dict))
+            piece_importance_traj.append(
+                self._build_piece_importance(
+                    graph,
+                    x_dict,
+                    q_scores=q_scores,
+                    legal_moves=legal_moves,
+                )
+            )
 
         n = len(eval_traj)
 
@@ -893,8 +929,7 @@ class CaseTutor:
             mistakes  = [m for m in side_moves
                          if m["eval_drop"] is not None
                          and _MISTAKE_THRESHOLD < m["eval_drop"] <= _BLUNDER_THRESHOLD]
-            best_moves = [m for m in side_moves
-                          if m["eval_drop"] is not None and m["eval_drop"] < -_MISTAKE_THRESHOLD]
+            best_moves = [m for m in side_moves if m["rank"] == 1]
             return {
                 "moves_played":          nm,
                 "avg_move_rank":         round(sum(ranks) / len(ranks), 3) if ranks else None,
@@ -920,16 +955,28 @@ class CaseTutor:
         avg_branching   = round(sum(legal_traj) / n, 2) if n else 0.0
         game_sharpness  = round(float(torch.tensor(eval_traj).std().item()), 4) if n > 1 else 0.0
 
-        # Decisiveness: fraction of adjacent eval-pairs that share a direction
-        # (no sign flip = perfectly decisive = 1.0)
+        # Lead stability: how consistently one side held the edge, ignoring
+        # near-equal positions that would otherwise create noisy sign flips.
         decisiveness = 1.0
-        if n >= 3:
-            diffs = [eval_traj[i + 1] - eval_traj[i] for i in range(n - 1)]
-            sign_flips = sum(
-                1 for i in range(len(diffs) - 1)
-                if diffs[i] * diffs[i + 1] < 0
-            )
-            decisiveness = round(1.0 - sign_flips / max(len(diffs) - 1, 1), 4)
+        if n >= 2:
+            lead_states = [
+                1 if v > 0.05 else -1 if v < -0.05 else 0
+                for v in eval_traj
+            ]
+            decisive_states = [state for state in lead_states if state != 0]
+            if len(decisive_states) >= 2:
+                lead_changes = sum(
+                    1 for prev, nxt in zip(decisive_states, decisive_states[1:])
+                    if prev != nxt
+                )
+                decisiveness = round(
+                    1.0 - lead_changes / max(len(decisive_states) - 1, 1),
+                    4,
+                )
+            elif len(decisive_states) == 1:
+                decisiveness = 1.0
+            else:
+                decisiveness = 0.5
 
         # Structural game-level aggregates
         avg_coordination = round(sum(coordination_traj) / n, 4) if n else 0.0

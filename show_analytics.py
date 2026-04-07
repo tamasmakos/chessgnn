@@ -48,6 +48,7 @@ _HEATMAP_CHARS = " ·░▒▓█"   # 6 levels (0→5)
 
 def _load_model(path: str, device: torch.device) -> GATEAUChessModel:
     ckpt = torch.load(path, map_location=device, weights_only=True)
+    has_human_q_head = any(k.startswith("human_q_head.") for k in ckpt)
     if "global_gru.weight_ih_l0" in ckpt:
         hidden_channels = ckpt["global_gru.weight_ih_l0"].shape[0] // 3
     else:
@@ -62,7 +63,8 @@ def _load_model(path: str, device: torch.device) -> GATEAUChessModel:
         num_layers=num_layers,
         temporal_mode="global_gru",
     )
-    model.load_state_dict(ckpt)
+    model.load_state_dict(ckpt, strict=has_human_q_head)
+    model.has_trained_human_q_head = has_human_q_head
     model.to(device)
     model.eval()
     return model
@@ -138,8 +140,6 @@ def _tag(drop: float | None) -> str:
         return "BLUNDER ❗"
     if drop > 0.075:
         return "Mistake ⚠"
-    if drop < -0.075:
-        return "Best ✓"
     return ""
 
 
@@ -149,6 +149,38 @@ def _pct_str(v: float | None) -> str:
 
 def _rank_str(r: int | None, total: int) -> str:
     return f"{r}/{total}" if r is not None else "—"
+
+
+def _eval_summary(value: float) -> str:
+    if abs(value) < 0.05:
+        return "balanced"
+    if abs(value) < 0.20:
+        return f"slight {'white' if value > 0 else 'black'} edge"
+    return f"{'white' if value > 0 else 'black'} advantage"
+
+
+def _lead_stability_summary(value: float) -> str:
+    if value >= 0.85:
+        return "one side kept the edge"
+    if value >= 0.60:
+        return "some momentum swings"
+    return "back-and-forth game"
+
+
+def _move_tag(rank: int | None, drop: float | None, terminal_board: chess.Board | None = None) -> str:
+    if terminal_board is not None:
+        if terminal_board.is_checkmate():
+            return "Mate #"
+        if terminal_board.is_stalemate() or terminal_board.is_insufficient_material():
+            return "Draw ="
+    if drop is not None:
+        if drop > 0.15:
+            return "BLUNDER ❗"
+        if drop > 0.075:
+            return "Mistake ⚠"
+    if rank == 1:
+        return "Best ✓"
+    return ""
 
 
 # ---------------------------------------------------------------------------
@@ -178,7 +210,9 @@ def print_report(
     print(f"  {w_name} ({w_elo}) ⬜  vs  ⬛ {b_name} ({b_elo})")
     if opening:
         print(f"  {opening}")
-    print(f"  Result: {result}   |   {stats['n_moves']} moves analysed")
+    analysed_plies = stats["n_moves"]
+    analysed_full_moves = (analysed_plies + 1) // 2
+    print(f"  Result: {result}   |   {analysed_plies} plies analysed (~{analysed_full_moves} full moves)")
     print()
 
     # -----------------------------------------------------------------------
@@ -199,12 +233,21 @@ def print_report(
     print()
     # Quick stats
     ev = stats["eval_trajectory"]
+    terminal_board = chess.Board(fens[-1]) if fens else None
     print(f"  Start eval : {ev[0]:+.3f}  (±0 = equal)")
-    print(f"  Final eval : {ev[-1]:+.3f}  ({'white' if ev[-1] > 0 else 'black'} advantage)")
+    print(f"  Last analysed eval : {ev[-1]:+.3f}  ({_eval_summary(ev[-1])})")
+    if terminal_board is not None and terminal_board.is_game_over():
+        if terminal_board.is_checkmate():
+            winner = "black" if terminal_board.turn == chess.WHITE else "white"
+            print(f"  Terminal outcome   : checkmate, {winner} won")
+        elif terminal_board.is_stalemate():
+            print("  Terminal outcome   : stalemate")
+        elif terminal_board.is_insufficient_material():
+            print("  Terminal outcome   : draw by insufficient material")
     print(f"  Sharpness  : {stats['game_sharpness']:.3f}  "
           f"({'volatile' if stats['game_sharpness'] > 0.15 else 'stable'} game)")
-    print(f"  Decisiveness: {stats['decisiveness']:.2f}  "
-          f"({'consistent direction' if stats['decisiveness'] > 0.7 else 'direction reversed frequently'})")
+    print(f"  Lead stability: {stats['decisiveness']:.2f}  "
+          f"({_lead_stability_summary(stats['decisiveness'])})")
     print()
 
     # -----------------------------------------------------------------------
@@ -279,7 +322,7 @@ def print_report(
                     mv_num = (i // 2) + 1
                     board_t = chess.Board(fens[i])
                     san_t = board_t.san(chess.Move.from_uci(ucis[i]))
-                    print(f"  {side_name_nov:<12} first novelty   : "
+                    print(f"  {side_name_nov:<12} first deviation : "
                           f"move {mv_num} ({san_t}) — "
                           f"ranked {mr[i]}/{stats['legal_moves_trajectory'][i]}")
                     break
@@ -316,7 +359,7 @@ def print_report(
     print("─" * 60)
     print("  MOVE-BY-MOVE BREAKDOWN")
     print()
-    header = f"  {'#':>3}  {'Side':<6}  {'UCI':<7}  {'Rank':>7}  {'Pct':>5}  {'Eval':>6}  {'Drop':>6}  Tag"
+    header = f"  {'#':>3}  {'Side':<6}  {'Move':<7}  {'Rank':>7}  {'Pct':>5}  {'Eval':>6}  {'Drop':>6}  Tag"
     print(header)
     print("  " + "─" * (len(header) - 2))
 
@@ -332,18 +375,24 @@ def print_report(
         rank = stats["move_ranks"][i]
         pct  = stats["move_percentiles"][i]
         drop = stats["eval_drops"][i]
+        next_board = chess.Board(fens[i + 1]) if i + 1 < len(fens) else None
         eval_after = stats["eval_trajectory"][i + 1] if i + 1 < len(stats["eval_trajectory"]) else None
-        tag  = _tag(drop)
+        tag  = _move_tag(rank, drop, next_board)
         rank_s = _rank_str(rank, n_legal)
         pct_s  = _pct_str(pct)
-        eval_s = f"{eval_after:+.3f}" if eval_after is not None else "     "
+        if next_board is not None and next_board.is_checkmate():
+            eval_s = " MATE"
+        elif next_board is not None and (next_board.is_stalemate() or next_board.is_insufficient_material()):
+            eval_s = " DRAW"
+        else:
+            eval_s = f"{eval_after:+.3f}" if eval_after is not None else "     "
         drop_s = f"{drop:+.3f}" if drop is not None else "     "
         print(f"  {i+1:>3}  {side_str:<6}  {san:<7}  {rank_s:>7}  {pct_s:>5}  {eval_s:>6}  {drop_s:>6}  {tag}")
         board.push(move)
 
     print()
-    print("  Rank: move rank vs all legal moves. Pct: fraction of moves beaten (higher = better).")
-    print("  Drop: win-prob change from the mover's perspective (positive = advantage lost).")
+    print("  Rank: move rank vs all legal moves. Pct: fraction of legal moves beaten (higher = better).")
+    print("  Drop: model-eval change from the mover's perspective (positive = advantage lost).")
 
     # -----------------------------------------------------------------------
     # Theoretical Profile
@@ -651,14 +700,18 @@ def print_report(
             played = board_t.san(chess.Move.from_uci(ucis[i]))
         drop_s = ""
         ed = stats.get("eval_drops")
+        rank_list = stats.get("move_ranks")
+        rank_i = rank_list[i] if rank_list and i < len(rank_list) else None
         if ed and i < len(ed) and ed[i] is not None:
             d = ed[i]
             if d > 0.15:
                 drop_s = f"BLUNDER {d:+.2f}"
             elif d > 0.075:
                 drop_s = f"miss {d:+.2f}"
+            elif rank_i == 1:
+                drop_s = f"top choice {d:+.2f}"
             elif d < -0.05:
-                drop_s = f"exploited {d:+.2f}"
+                drop_s = f"improved {d:+.2f}"
             else:
                 drop_s = f"{d:+.2f}"
         critical_moments.append((mv_n, sd, "; ".join(motifs), played, drop_s))
@@ -704,9 +757,9 @@ def print_report(
     traj = stats.get("piece_importance_trajectory")
     if traj:
         print("─" * 60)
-        print("  GNN PIECE IMPORTANCE TRAJECTORY")
-        print("  (L2-norm of each piece's final GNN embedding, normalised per position)")
-        print("  Measures how much model computation passed through each piece node.")
+        print("  PIECE IMPORTANCE TRAJECTORY")
+        print("  (Share of move-probability mass carried by each source piece, normalised per position)")
+        print("  Measures which pieces the policy is most actively considering.")
         print()
 
         # Collect all squares that appear across the game and their per-position importance
@@ -780,7 +833,7 @@ def print_report(
             print(f"  {sq:<8}  {spark_str:<42}  {avg:>5.2f}  {var:>5.3f}  {pmov:>5}")
 
         print()
-        print(f"  Top piece by GNN activation at each half-move:")
+        print(f"  Top piece by policy mass at each half-move:")
         for i, (sq, imp) in enumerate(top_per_move):
             move_label = f"{(i // 2) + 1}{'w' if i % 2 == 0 else 'b'}"
             print(f"    {move_label:<5} {sq:<6} ({imp:.2f})", end="  ")
