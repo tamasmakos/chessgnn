@@ -6,5 +6,6 @@ __pycache__
 agent
 input
 memory-bank
-.github
+.github/*
+!.github/workflows/
 .pytest_cache
