@@ -307,7 +307,7 @@ class TestEvaluateHumanMovePrediction:
         monkeypatch.setattr(
             evaluator,
             "_pick_topk_moves_uci",
-            lambda fen, k=3: ["e2e4", "d2d4", "g1f3"] if fen == STARTING_FEN else ["e7e5", "c7c5", "d7d5"],
+            lambda fen, k=3, **kw: ["e2e4", "d2d4", "g1f3"] if fen == STARTING_FEN else ["e7e5", "c7c5", "d7d5"],
         )
         with tempfile.NamedTemporaryFile(mode="w", suffix=".jsonl", delete=False) as tf:
             _write_sample_games_jsonl(tf.name)
@@ -321,7 +321,7 @@ class TestEvaluateHumanMovePrediction:
         monkeypatch.setattr(
             evaluator,
             "_pick_topk_moves_uci",
-            lambda fen, k=3: ["e2e4", "d2d4", "g1f3"] if fen == STARTING_FEN else ["e7e5", "c7c5", "d7d5"],
+            lambda fen, k=3, **kw: ["e2e4", "d2d4", "g1f3"] if fen == STARTING_FEN else ["e7e5", "c7c5", "d7d5"],
         )
         with tempfile.NamedTemporaryFile(mode="w", suffix=".jsonl", delete=False) as tf:
             _write_sample_games_jsonl(tf.name)
@@ -333,7 +333,7 @@ class TestEvaluateHumanMovePrediction:
         monkeypatch.setattr(
             evaluator,
             "_pick_topk_moves_uci",
-            lambda fen, k=3: ["a2a3", "e2e4", "d2d4"] if fen == STARTING_FEN else ["a7a6", "e7e5", "c7c5"],
+            lambda fen, k=3, **kw: ["a2a3", "e2e4", "d2d4"] if fen == STARTING_FEN else ["a7a6", "e7e5", "c7c5"],
         )
         with tempfile.NamedTemporaryFile(mode="w", suffix=".jsonl", delete=False) as tf:
             _write_sample_games_jsonl(tf.name)
@@ -345,7 +345,7 @@ class TestEvaluateHumanMovePrediction:
         monkeypatch.setattr(
             evaluator,
             "_pick_topk_moves_uci",
-            lambda fen, k=3: ["e2e4", "d2d4", "g1f3"] if fen == STARTING_FEN else ["e7e5", "c7c5", "d7d5"],
+            lambda fen, k=3, **kw: ["e2e4", "d2d4", "g1f3"] if fen == STARTING_FEN else ["e7e5", "c7c5", "d7d5"],
         )
         with tempfile.NamedTemporaryFile(mode="w", suffix=".jsonl", delete=False) as tf:
             _write_sample_games_jsonl(tf.name)

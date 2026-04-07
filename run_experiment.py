@@ -233,9 +233,11 @@ def _train_sequential(
             elo_norm: float = float(game["elo_norm"])
             T = len(graphs)
 
-            # One backbone pass → two value decodings (SF + player ELO)
-            values_sf, values_player, q_scores_list, _ = model.forward_sequence_with_q_dual(
-                graphs, elo_norm_sf=1.0, elo_norm_player=elo_norm
+            # One backbone pass → two value decodings + two Q heads
+            values_sf, values_player, q_engine_list, q_human_list, _ = (
+                model.forward_sequence_with_q_dual(
+                    graphs, elo_norm_sf=1.0, elo_norm_player=elo_norm
+                )
             )
 
             l_v_sf = F.mse_loss(values_sf.squeeze(-1), sf_targets)
@@ -246,21 +248,26 @@ def _train_sequential(
             valid_t = 0
             valid_t_human = 0
             for t_idx in range(T):
+                # --- Engine policy loss (q_head) ---
                 pt = policy_targets_list[t_idx]
                 if not isinstance(pt, torch.Tensor):
                     continue
                 pt = pt.to(device)
                 if pt.numel() == 0:
                     continue
-                q = q_scores_list[t_idx]
-                log_q = F.log_softmax(q / temp, dim=0)
-                l_q_sum = l_q_sum + F.kl_div(log_q, pt, reduction="sum")
+                q_eng = q_engine_list[t_idx]
+                log_q_eng = F.log_softmax(q_eng / temp, dim=0)
+                l_q_sum = l_q_sum + F.kl_div(log_q_eng, pt, reduction="sum")
                 valid_t += 1
+
+                # --- Human policy loss (human_q_head — separate decoder) ---
                 if t_idx < len(human_policy_targets_list):
                     human_pt = human_policy_targets_list[t_idx]
                     if isinstance(human_pt, torch.Tensor) and human_pt.numel() > 0:
                         human_pt = human_pt.to(device)
-                        l_q_human_sum = l_q_human_sum + F.kl_div(log_q, human_pt, reduction="sum")
+                        q_hum = q_human_list[t_idx]
+                        log_q_hum = F.log_softmax(q_hum / temp, dim=0)
+                        l_q_human_sum = l_q_human_sum + F.kl_div(log_q_hum, human_pt, reduction="sum")
                         valid_t_human += 1
             l_q_mean = l_q_sum / max(valid_t, 1)
             l_q_human_mean = l_q_human_sum / max(valid_t_human, 1)
@@ -468,6 +475,18 @@ def train_model(cfg: dict, device: torch.device) -> tuple[GATEAUChessModel, dict
         "[%s] GATEAUChessModel: hidden=%d  layers=%d  params=%s",
         run_name, cfg["hidden_channels"], cfg["num_layers"], f"{params:,}",
     )
+
+    # Optional: pre-load an existing checkpoint before training (e.g. for eval-only runs)
+    preload_ckpt = cfg.get("checkpoint")
+    if preload_ckpt and os.path.exists(preload_ckpt):
+        state = torch.load(preload_ckpt, map_location=device, weights_only=True)
+        # Tolerate checkpoints that lack human_q_head (old pure models): load strict=False
+        missing, unexpected = model.load_state_dict(state, strict=False)
+        if missing:
+            logger.info("[%s] Preloaded %s — missing keys (new heads): %s",
+                        run_name, preload_ckpt, missing)
+        else:
+            logger.info("[%s] Preloaded weights from %s", run_name, preload_ckpt)
 
     if cfg.get("sequential"):
         # ---- Sequential mode: full-game sequences, dual value loss ----

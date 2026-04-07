@@ -286,13 +286,22 @@ class CaseTutor:
     ):
         """Single-pass move ranking via Q-head."""
         graph = self.builder.fen_to_graph(fen).to(self.device)
+        _has_dual = hasattr(self.model, 'forward_with_q_dual')
         with torch.no_grad():
             if explain:
-                value, q_scores, _, x_dict = self.model.forward_with_q(
-                    graph, elo_norm=elo_norm, return_embeddings=True
-                )
+                if _has_dual:
+                    value, q_scores, q_human_scores, _, x_dict = self.model.forward_with_q_dual(
+                        graph, elo_norm_sf=elo_norm, elo_norm_player=elo_norm,
+                        return_embeddings=True
+                    )
+                else:
+                    value, q_scores, _, x_dict = self.model.forward_with_q(
+                        graph, elo_norm=elo_norm, return_embeddings=True
+                    )
+                    q_human_scores = None
             else:
                 value, q_scores, _ = self.model.forward_with_q(graph, elo_norm=elo_norm)
+                q_human_scores = None
                 x_dict = None
 
         q_list = q_scores.cpu().tolist()
@@ -329,7 +338,8 @@ class CaseTutor:
 
         if explain:
             internals = self._build_explain(
-                board, legal_moves, q_scores, value, graph, elo_norm, x_dict
+                board, legal_moves, q_scores, value, graph, elo_norm, x_dict,
+                q_human_scores=q_human_scores,
             )
             return best_move, best_prob, move_scores, uncertainty, internals
 
@@ -344,6 +354,7 @@ class CaseTutor:
         graph,
         elo_norm: float,
         x_dict: dict | None = None,
+        q_human_scores: torch.Tensor | None = None,
     ) -> dict:
         """Build a plot-ready internals dict from a completed forward pass.
 
@@ -409,6 +420,11 @@ class CaseTutor:
             "dest_heatmap":   dest_heatmap,
             "src_heatmap":    src_heatmap,
             "elo_diff":       elo_diff,
+            # --- human Q head (only present when model has forward_with_q_dual) ---
+            "human_q_distribution": self._build_q_dist(legal_moves, q_human_scores)
+                if q_human_scores is not None else None,
+            "human_top_moves": self._build_q_dist(legal_moves, q_human_scores)[:5]
+                if q_human_scores is not None else None,
             # --- structural / graph-theoretic real-time fields ---
             "structural_fingerprint": position_fingerprint(board),
             "tension_map":      self._build_tension_map(board),
@@ -423,6 +439,33 @@ class CaseTutor:
     # ------------------------------------------------------------------
     # Board-structural helpers used by _build_explain
     # ------------------------------------------------------------------
+
+    @staticmethod
+    def _build_q_dist(
+        legal_moves: list,
+        q_scores: "torch.Tensor",
+    ) -> list[dict]:
+        """Convert Q-score tensor into a sorted move-probability list.
+
+        Returns the same format as ``q_distribution`` in ``_build_explain``,
+        suitable for display in JSON or analytics UIs:
+        ``[{"uci": str, "prob": float, "from": str, "to": str}, ...]``
+        sorted best-first.
+        """
+        probs = torch.softmax(q_scores.detach(), dim=0).cpu().tolist()
+        indexed = sorted(
+            zip(legal_moves, probs),
+            key=lambda x: -x[1],
+        )
+        return [
+            {
+                "uci":  move.uci(),
+                "prob": round(p, 6),
+                "from": chess.square_name(move.from_square),
+                "to":   chess.square_name(move.to_square),
+            }
+            for move, p in indexed
+        ]
 
     @staticmethod
     def _build_tension_map(board: chess.Board) -> list[list[float]]:
@@ -662,6 +705,9 @@ class CaseTutor:
         gini_traj:   list[float] = []
         # Q distributions for move attribution: sorted (uci, prob) best-first
         q_dists: list[list[tuple[str, float]]] = []
+        # Human Q distributions (None when model lacks human_q_head)
+        _has_dual = hasattr(self.model, 'forward_with_q_dual')
+        human_q_dists: list[list[tuple[str, float]]] | None = [] if _has_dual else None
         # Accumulated heatmaps (raw, normalised later)
         acc_dest = [[0.0] * 8 for _ in range(8)]
         acc_src  = [[0.0] * 8 for _ in range(8)]
@@ -689,10 +735,17 @@ class CaseTutor:
             elo_norm = elo_w if board.turn == chess.WHITE else elo_b
             graph = self.builder.fen_to_graph(fen).to(self.device)
             with torch.no_grad():
-                value, q_scores, _, cache, x_dict = self.model.forward_with_q(
-                    graph, cache=cache, elo_norm=elo_norm,
-                    return_cache=True, return_embeddings=True,
-                )
+                if _has_dual:
+                    value, q_scores, q_human_raw, _, cache, x_dict = self.model.forward_with_q_dual(
+                        graph, cache=cache, elo_norm_sf=1.0, elo_norm_player=elo_norm,
+                        return_cache=True, return_embeddings=True,
+                    )
+                else:
+                    q_human_raw = None
+                    value, q_scores, _, cache, x_dict = self.model.forward_with_q(
+                        graph, cache=cache, elo_norm=elo_norm,
+                        return_cache=True, return_embeddings=True,
+                    )
 
             eval_traj.append(round(float(value.item()), 6))
 
@@ -714,6 +767,16 @@ class CaseTutor:
                     key=lambda x: -x[1],
                 )
             )
+
+            # Human Q distribution (only when dual head available)
+            if q_human_raw is not None and human_q_dists is not None:
+                human_probs = torch.softmax(q_human_raw.detach(), dim=0).cpu().tolist()
+                human_q_dists.append(
+                    sorted(
+                        [(m.uci(), p) for m, p in zip(legal_moves, human_probs)],
+                        key=lambda x: -x[1],
+                    )
+                )
 
             # Centre pressure: Q-prob mass on {d4, d5, e4, e5}
             center_press = sum(
@@ -947,6 +1010,12 @@ class CaseTutor:
 
             # GNN learned piece importance per position
             "piece_importance_trajectory": piece_importance_traj,
+
+            # Engine Q distributions per position (sorted best-first): list[list[(uci, prob)]]
+            "engine_q_trajectory": q_dists,
+
+            # Human Q distributions (None when model lacks human_q_head)
+            "human_q_trajectory": human_q_dists,
         }
 
     def estimate_elo(self, game_stats: dict, side: str = "white") -> dict:

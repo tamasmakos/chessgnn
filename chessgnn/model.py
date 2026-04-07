@@ -260,8 +260,17 @@ class GATEAUChessModel(nn.Module):
             nn.Tanh(),
         )
 
-        # Q-head: h_piece ‖ h_square ‖ edge_attr(5) ‖ elo_embed → scalar
+        # Q-head (engine policy): h_piece ‖ h_square ‖ edge_attr(5) ‖ elo_embed → scalar
         self.q_head = nn.Sequential(
+            nn.Linear(hidden_channels * 2 + 5 + self._elo_dim, hidden_channels),
+            nn.GELU(),
+            nn.Linear(hidden_channels, 1),
+        )
+
+        # Human Q-head: same architecture as q_head but trained separately on
+        # played-move targets.  Conditioned on player ELO rather than engine ELO
+        # so it learns "what does a player at this skill level typically play?"
+        self.human_q_head = nn.Sequential(
             nn.Linear(hidden_channels * 2 + 5 + self._elo_dim, hidden_channels),
             nn.GELU(),
             nn.Linear(hidden_channels, 1),
@@ -504,6 +513,64 @@ class GATEAUChessModel(nn.Module):
             result.append(x_dict)
         return tuple(result)
 
+    def forward_with_q_dual(
+        self,
+        graph,
+        cache: KVCache | None = None,
+        elo_norm_sf: float = 1.0,
+        elo_norm_player: float = 1.0,
+        return_cache: bool = False,
+        return_embeddings: bool = False,
+    ) -> tuple:
+        """Single-pass inference returning value and **both** Q heads.
+
+        The GNN backbone runs once; the engine Q-head is conditioned on
+        ``elo_norm_sf`` (typically 1.0) and the human Q-head on
+        ``elo_norm_player`` (the actual player's normalised ELO).
+
+        Returns
+        -------
+        value : Tensor [1, 1]
+        q_engine : Tensor [M]   — engine-policy Q scores (argmax = recommended move)
+        q_human  : Tensor [M]   — human-policy Q scores  (argmax = typical player move)
+        move_edge_index : Tensor [2, M]
+        new_cache : KVCache  (only when return_cache=True)
+        x_dict : dict[str, Tensor]  (only when return_embeddings=True)
+        """
+        x_dict = self._encode(graph)
+        feat, new_cache = self._apply_temporal(x_dict, cache)
+        value = self._pool_value(feat, elo_norm_sf)
+
+        move_edge_index = graph['piece', 'move', 'square'].edge_index  # [2, M]
+        move_edge_attr = graph['piece', 'move', 'square'].edge_attr    # [M, 5]
+        m = move_edge_index.shape[1]
+
+        device = feat.device
+
+        # Engine Q head
+        elo_t_sf = torch.tensor([[elo_norm_sf]], dtype=torch.float32, device=device)
+        elo_e_sf = self.elo_embed(elo_t_sf)
+        elo_expand_sf = elo_e_sf.expand(m, -1)
+        src_idx, dst_idx = move_edge_index
+        h_src = x_dict['piece'][src_idx]
+        h_dst = x_dict['square'][dst_idx]
+        q_feats_sf = torch.cat([h_src, h_dst, move_edge_attr, elo_expand_sf], dim=1)
+        q_engine = self.q_head(q_feats_sf).squeeze(-1)                    # [M]
+
+        # Human Q head — different ELO conditioning, separate MLP
+        elo_t_pl = torch.tensor([[elo_norm_player]], dtype=torch.float32, device=device)
+        elo_e_pl = self.elo_embed(elo_t_pl)
+        elo_expand_pl = elo_e_pl.expand(m, -1)
+        q_feats_pl = torch.cat([h_src, h_dst, move_edge_attr, elo_expand_pl], dim=1)
+        q_human = self.human_q_head(q_feats_pl).squeeze(-1)               # [M]
+
+        result: list = [value, q_engine, q_human, move_edge_index]
+        if return_cache:
+            result.append(new_cache)
+        if return_embeddings:
+            result.append(x_dict)
+        return tuple(result)
+
     # ------------------------------------------------------------------
     # Public API — sequence (training)
     # ------------------------------------------------------------------
@@ -603,28 +670,30 @@ class GATEAUChessModel(nn.Module):
         graphs: list,
         elo_norm_sf: float = 1.0,
         elo_norm_player: float = 1.0,
-    ) -> tuple[torch.Tensor, torch.Tensor, list[torch.Tensor], list[torch.Tensor]]:
+    ) -> tuple[torch.Tensor, torch.Tensor, list[torch.Tensor], list[torch.Tensor], list[torch.Tensor]]:
         """Like :meth:`forward_sequence_with_q` but decodes **two** value tensors
-        in a single GNN backbone pass.
+        and **two** Q-head tensors in a single GNN backbone pass.
 
-        The GNN + GRU chain runs once per position.  After accumulating all
-        temporal features the value head is applied twice with different ELO
-        embeddings.  This halves backbone compute for the dual-target training
-        objective compared to calling :meth:`forward_sequence_with_q` twice.
+        Engine Q scores come from ``q_head`` conditioned on ``elo_norm_sf``.
+        Human Q scores come from ``human_q_head`` conditioned on
+        ``elo_norm_player``.  The two heads share the GNN backbone but have
+        independent MLP weights, so the engine policy and human policy targets
+        no longer interfere with each other's gradients.
 
         Parameters
         ----------
         graphs : list of HeteroData
         elo_norm_sf : float
-            ELO for the Stockfish-perspective value (default 1.0).
+            ELO for the Stockfish-perspective value and engine Q head (default 1.0).
         elo_norm_player : float
-            ELO for the player-outcome value.
+            ELO for the player-outcome value and human Q head.
 
         Returns
         -------
         values_sf : Tensor [T, 1]
         values_player : Tensor [T, 1]
-        q_scores_list : list of Tensor [M_t]  (uses elo_norm_sf for Q)
+        q_engine_list : list of Tensor [M_t]  — engine Q scores per position
+        q_human_list  : list of Tensor [M_t]  — human Q scores per position
         move_edge_indices : list of Tensor [2, M_t]
         """
         device = next(self.parameters()).device
@@ -637,12 +706,10 @@ class GATEAUChessModel(nn.Module):
 
         vals_sf: list[torch.Tensor] = []
         vals_pl: list[torch.Tensor] = []
-        q_scores_list: list[torch.Tensor] = []
+        q_engine_list: list[torch.Tensor] = []
+        q_human_list: list[torch.Tensor] = []
         move_edge_indices: list[torch.Tensor] = []
 
-        # Batch-encode all T positions through the GNN in one fused pass.
-        # The GRU still runs sequentially (temporal dependency), but the
-        # expensive HGT convolutions now see T× more nodes on the GPU.
         all_x_dicts = self._encode_batch(graphs)
 
         cache: KVCache | None = None
@@ -658,21 +725,31 @@ class GATEAUChessModel(nn.Module):
             m = move_edge_index.shape[1]
 
             if m > 0:
-                elo_expand = elo_e_sf.expand(m, -1)
                 src_idx, dst_idx = move_edge_index
                 h_src = x_dict['piece'][src_idx]
                 h_dst = x_dict['square'][dst_idx]
-                q_feats = torch.cat([h_src, h_dst, move_edge_attr, elo_expand], dim=1)
-                q_scores = self.q_head(q_feats).squeeze(-1)
-            else:
-                q_scores = torch.empty(0, device=device)
 
-            q_scores_list.append(q_scores)
+                # Engine Q head (sf ELO)
+                elo_expand_sf = elo_e_sf.expand(m, -1)
+                q_feats_sf = torch.cat([h_src, h_dst, move_edge_attr, elo_expand_sf], dim=1)
+                q_engine = self.q_head(q_feats_sf).squeeze(-1)
+
+                # Human Q head (player ELO, separate decoder)
+                elo_expand_pl = elo_e_pl.expand(m, -1)
+                q_feats_pl = torch.cat([h_src, h_dst, move_edge_attr, elo_expand_pl], dim=1)
+                q_human = self.human_q_head(q_feats_pl).squeeze(-1)
+            else:
+                q_engine = torch.empty(0, device=device)
+                q_human = torch.empty(0, device=device)
+
+            q_engine_list.append(q_engine)
+            q_human_list.append(q_human)
             move_edge_indices.append(move_edge_index)
 
         return (
             torch.cat(vals_sf, dim=0),
             torch.cat(vals_pl, dim=0),
-            q_scores_list,
+            q_engine_list,
+            q_human_list,
             move_edge_indices,
         )

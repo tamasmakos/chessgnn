@@ -162,23 +162,35 @@ class Evaluator:
     # Internal: single-position move picker
     # ------------------------------------------------------------------
 
-    def _pick_best_move_uci(self, fen: str) -> str | None:
+    def _pick_best_move_uci(self, fen: str, use_human_head: bool = False) -> str | None:
         """Return the UCI string of the model's top-1 move, or None."""
-        topk = self._pick_topk_moves_uci(fen, k=1)
+        topk = self._pick_topk_moves_uci(fen, k=1, use_human_head=use_human_head)
         return topk[0] if topk else None
 
-    def _pick_topk_moves_uci(self, fen: str, k: int = 3) -> list[str]:
-        """Return up to k model-ranked legal moves for a position."""
+    def _pick_topk_moves_uci(self, fen: str, k: int = 3, use_human_head: bool = False) -> list[str]:
+        """Return up to k model-ranked legal moves for a position.
+
+        Parameters
+        ----------
+        use_human_head : bool
+            When True and the model exposes ``forward_with_q_dual``, scores
+            moves from the ``human_q_head`` instead of the engine ``q_head``.
+            This measures whether the model predicts what a human would play.
+        """
         board = chess.Board(fen)
         legal_moves = list(board.legal_moves)
         if not legal_moves:
             return []
 
         graph = self.builder.fen_to_graph(fen).to(self.device)
+        _has_dual = hasattr(self.model, 'forward_with_q_dual')
 
         with torch.no_grad():
             if self._has_q_head:
-                _, q_scores, _ = self.model.forward_with_q(graph)
+                if use_human_head and _has_dual:
+                    _, _, q_scores, _ = self.model.forward_with_q_dual(graph)
+                else:
+                    _, q_scores, _ = self.model.forward_with_q(graph)
                 q_list = q_scores.cpu().tolist()
                 if len(q_list) != len(legal_moves):
                     return []
@@ -290,8 +302,17 @@ class Evaluator:
         k: int = 3,
         max_games: int = 0,
         max_positions: int = 0,
+        use_human_head: bool = False,
     ) -> dict[str, float]:
-        """Measure whether the model predicts the move actually played by humans."""
+        """Measure whether the model predicts the move actually played by humans.
+
+        Parameters
+        ----------
+        use_human_head : bool
+            When True, scores are taken from the ``human_q_head`` (if the
+            model exposes ``forward_with_q_dual``) instead of the standard
+            engine Q head.  Useful for comparing the two decoders head-to-head.
+        """
         top1_correct = 0
         topk_correct = 0
         count = 0
@@ -308,7 +329,7 @@ class Evaluator:
                 played_uci = infer_played_move_uci(fen, fens[idx + 1])
                 if played_uci is None:
                     continue
-                predicted = self._pick_topk_moves_uci(fen, k=k)
+                predicted = self._pick_topk_moves_uci(fen, k=k, use_human_head=use_human_head)
                 if not predicted:
                     continue
                 if predicted[0] == played_uci:

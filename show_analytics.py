@@ -532,6 +532,81 @@ def print_report(
         print()
 
     # -----------------------------------------------------------------------
+    # Move Gap Analysis (dual-head model only)
+    # -----------------------------------------------------------------------
+    human_q_traj  = stats.get("human_q_trajectory")
+    engine_q_traj = stats.get("engine_q_trajectory")
+    if human_q_traj is not None and engine_q_traj is not None:
+        print("─" * 60)
+        print("  MOVE GAP ANALYSIS  (engine recommendation vs typical-player prediction)")
+        print("  Shown only where the model's engine head and human head disagree on top-1 move.")
+        print()
+
+        # Find positions where engine top-1 ≠ human top-1
+        gaps: list[tuple] = []
+        for pos_idx in range(min(len(engine_q_traj), len(human_q_traj), len(ucis))):
+            eq = engine_q_traj[pos_idx]
+            hq = human_q_traj[pos_idx]
+            if not eq or not hq:
+                continue
+            eng_top1_uci, eng_top1_prob = eq[0]
+            hum_top1_uci, hum_top1_prob = hq[0]
+            if eng_top1_uci != hum_top1_uci:
+                played_uci = ucis[pos_idx]
+                eng_rank_played = next(
+                    (r + 1 for r, (u, _) in enumerate(eq) if u == played_uci), None
+                )
+                hum_rank_played = next(
+                    (r + 1 for r, (u, _) in enumerate(hq) if u == played_uci), None
+                )
+                # Probability gap: how much more probable engine top-1 is vs human top-1
+                prob_gap = abs(eng_top1_prob - hum_top1_prob)
+                gaps.append((
+                    pos_idx, eng_top1_uci, eng_top1_prob,
+                    hum_top1_uci, hum_top1_prob,
+                    played_uci, eng_rank_played, hum_rank_played,
+                    prob_gap, eq[:3], hq[:3],
+                ))
+
+        if not gaps:
+            print("  Engine and human heads agreed on top-1 move at every position.")
+            print("  (Consider training the human head on player-game data to create divergence.)")
+        else:
+            print(f"  {'#':>3}  {'Side':<5}  {'Played':<7}  "
+                  f"{'Eng.top1':<8}  {'Hum.top1':<8}  "
+                  f"{'Eng.prob':>8}  {'Hum.prob':>8}")
+            print("  " + "─" * 62)
+            for (pos_idx, eng_t1, eng_p, hum_t1, hum_p,
+                 played_uci, eng_rk, hum_rk, pgap, eq3, hq3) in gaps[:20]:
+                b_s = chess.Board(fens[pos_idx])
+                is_white = b_s.turn == chess.WHITE
+                side_str = "White" if is_white else "Black"
+                try:
+                    played_san = b_s.san(chess.Move.from_uci(played_uci))
+                    eng_san    = b_s.san(chess.Move.from_uci(eng_t1))
+                    hum_san    = b_s.san(chess.Move.from_uci(hum_t1))
+                except Exception:
+                    played_san, eng_san, hum_san = played_uci, eng_t1, hum_t1
+                print(f"  {pos_idx+1:>3}  {side_str:<5}  {played_san:<7}  "
+                      f"{eng_san:<8}  {hum_san:<8}  "
+                      f"{eng_p*100:>7.1f}%  {hum_p*100:>7.1f}%")
+            if len(gaps) > 20:
+                print(f"  … {len(gaps) - 20} more divergent positions omitted")
+
+        if gaps:
+            avg_gap = sum(g[8] for g in gaps) / len(gaps)
+            print()
+            print(f"  Divergent positions: {len(gaps)}/{min(len(engine_q_traj), len(ucis))}")
+            print(f"  Avg probability gap : {avg_gap*100:.1f}%  "
+                  f"(difference between engine and human top-1 probability)")
+            print()
+            print("  Interpretation: When the engine and human heads pick different moves,")
+            print("  the human head is predicting how a player at your ELO *typically* plays.")
+            print("  Study these positions — they reveal where your moves diverge from engine")
+            print("  recommendations and what human-typical patterns look like at your level.")
+        print()
+
+    # -----------------------------------------------------------------------
     # Critical moments & tactical patterns
     # -----------------------------------------------------------------------
     print("─" * 60)
