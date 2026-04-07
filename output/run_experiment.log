@@ -1,0 +1,321 @@
+2026-03-30 14:11:12,831 | INFO | === Experiment: gateau_medium_h128_l4 | device=cuda ===
+2026-03-30 14:11:12,833 | INFO | [gateau_medium_h128_l4] Online dataset: 10000 positions (depth=8)
+2026-03-30 14:11:12,889 | INFO | [gateau_medium_h128_l4] Val set: 150 positions from output/distillation_labels_val1k.jsonl
+2026-03-30 14:11:16,540 | INFO | [gateau_medium_h128_l4] GATEAUChessModel: hidden=128  layers=4  params=1,374,250
+2026-03-30 14:11:16,604 | INFO | OnlineDistillationDataset: producer started (depth=8, multipv=5, total=10000)
+2026-03-30 14:21:35,654 | WARNING | Engine terminated; restarting for remaining positions
+2026-03-30 14:23:16,805 | INFO | === Experiment: gateau_medium_h128_l4 | device=cuda ===
+2026-03-30 14:23:16,806 | INFO | [gateau_medium_h128_l4] Online dataset: 50000 positions (depth=8)
+2026-03-30 14:23:16,835 | INFO | [gateau_medium_h128_l4] Val set: 150 positions from output/distillation_labels_val1k.jsonl
+2026-03-30 14:23:17,419 | INFO | [gateau_medium_h128_l4] GATEAUChessModel: hidden=128  layers=4  params=1,374,250
+2026-03-30 14:23:17,428 | INFO | OnlineDistillationDataset: producer started (depth=8, multipv=5, total=50000)
+2026-03-30 15:03:23,253 | INFO | === Experiment: gateau_medium_h128_l4 | device=cuda ===
+2026-03-30 15:03:23,254 | INFO | [gateau_medium_h128_l4] Online dataset: 50000 positions (depth=8)
+2026-03-30 15:03:23,330 | INFO | [gateau_medium_h128_l4] Val set: 150 positions from output/distillation_labels_val1k.jsonl
+2026-03-30 15:03:24,250 | INFO | [gateau_medium_h128_l4] GATEAUChessModel: hidden=128  layers=4  params=1,374,250
+2026-03-30 15:03:38,011 | INFO | OnlineDistillationDataset: 4 workers started (depth=8, multipv=5, total=50000)
+2026-03-30 17:54:08,715 | INFO | OnlineDistillationDataset: 49699 positions yielded
+2026-03-30 17:54:17,643 | INFO | [gateau_medium_h128_l4] Epoch 1/1  loss=2.7894  val_top1=31.5%  val_top3=45.6%
+2026-03-30 17:54:17,740 | INFO | [gateau_medium_h128_l4]   → new best top-1 31.5%, checkpoint saved
+2026-03-30 17:54:17,740 | INFO | [gateau_medium_h128_l4] Training done in 10253s.  Best val top-1: 31.5%
+2026-03-30 17:55:15,054 | INFO | Engine agreement — top1: 0.279  top5: 0.525  (n=994)
+2026-03-30 17:56:11,832 | INFO | Value correlation — Pearson R=0.6015  Spearman ρ=0.6017  (n=1000)
+2026-03-30 17:56:43,110 | INFO | Puzzle accuracy — 0.248  (124/500)
+2026-03-30 17:57:49,457 | INFO | TemperatureScaler fitted: T=0.7673 (converged=True)
+2026-03-30 17:57:49,466 | INFO | TemperatureScaler saved to output/gateau_medium_h128_l4.pt.calib.json (T=0.7673)
+2026-03-30 17:57:49,470 | INFO | Results appended to output/scaling_results.csv
+2026-03-30 17:57:49,471 | INFO | === gateau_medium_h128_l4 done | top1=27.9% | puzzle=24.8% | R=0.602 | ECE 0.053→0.045 ===
+2026-03-30 17:57:49,472 | INFO | All experiments complete. Results → output/scaling_results.csv
+2026-03-31 09:25:15,458 | INFO | === Experiment: gateau_seq_smoke | device=cuda ===
+2026-03-31 09:25:15,513 | INFO | [gateau_seq_smoke] Val set: 50 positions from output/distillation_labels_val1k.jsonl
+2026-03-31 09:25:16,064 | INFO | [gateau_seq_smoke] GATEAUChessModel: hidden=64  layers=2  params=207,798
+2026-03-31 09:25:16,426 | INFO | GameSequenceDataset: 2 workers, 30 games (depth=4)
+2026-03-31 09:32:14,056 | INFO | GameSequenceDataset: 30 games yielded
+2026-03-31 09:32:16,872 | INFO | [gateau_seq_smoke] Epoch 1/1  loss=3.7988 (v_sf=0.1760 v_out=0.8808 q=3.1824)  val_top1=20.4%  val_top3=42.9%
+2026-03-31 09:32:16,928 | INFO | [gateau_seq_smoke]   → new best top-1 20.4%
+2026-03-31 09:32:16,928 | INFO | [gateau_seq_smoke] Sequential training done in 421s.  Best val top-1: 20.4%
+2026-03-31 09:32:57,139 | INFO | Engine agreement — top1: 0.202  top3: 0.360  (n=994)
+2026-03-31 09:33:41,874 | INFO | Value correlation — Pearson R=0.0755  Spearman ρ=0.0755  (n=1000)
+2026-03-31 09:33:44,111 | INFO | Puzzle accuracy — 0.260  (13/50)
+2026-03-31 09:34:24,218 | INFO | TemperatureScaler fitted: T=3.1154 (converged=True)
+2026-03-31 09:34:24,229 | INFO | TemperatureScaler saved to output/gateau_seq_smoke.pt.calib.json (T=3.1154)
+2026-03-31 09:34:24,234 | INFO | Results appended to output/scaling_results.csv
+2026-03-31 09:34:24,235 | INFO | === gateau_seq_smoke done | top1=20.2% | puzzle=26.0% | R=0.075 | ECE 0.043→0.003 ===
+2026-03-31 09:34:24,236 | INFO | All experiments complete. Results → output/scaling_results.csv
+2026-03-31 09:47:22,596 | INFO | === Experiment: gateau_medium_h128_l4 | device=cuda ===
+2026-03-31 09:47:22,617 | INFO | [gateau_medium_h128_l4] Val set: 150 positions from output/distillation_labels_val1k.jsonl
+2026-03-31 09:47:22,617 | INFO | [gateau_medium_h128_l4] Online dataset: 50000 positions (depth=8)
+2026-03-31 09:47:22,982 | INFO | [gateau_medium_h128_l4] GATEAUChessModel: hidden=128  layers=4  params=1,378,634
+2026-03-31 09:47:41,891 | INFO | === Experiment: gateau_seq_smoke | device=cuda ===
+2026-03-31 09:47:41,915 | INFO | [gateau_seq_smoke] Val set: 50 positions from output/distillation_labels_val1k.jsonl
+2026-03-31 09:47:42,265 | INFO | [gateau_seq_smoke] GATEAUChessModel: hidden=64  layers=2  params=207,798
+2026-03-31 09:47:42,411 | INFO | GameSequenceDataset: 2 workers, 30 games (depth=4)
+2026-03-31 09:51:03,306 | INFO | GameSequenceDataset: 30 games yielded
+2026-03-31 09:51:11,444 | INFO | [gateau_seq_smoke] Epoch 1/1  loss=3.7779 (v_sf=0.1749 v_out=0.8757 q=3.1652)  val_top1=18.4%  val_top3=46.9%
+2026-03-31 09:51:11,517 | INFO | [gateau_seq_smoke]   → new best top-1 18.4%
+2026-03-31 09:51:11,518 | INFO | [gateau_seq_smoke] Sequential training done in 209s.  Best val top-1: 18.4%
+2026-03-31 09:52:08,300 | INFO | Engine agreement — top1: 0.202  top3: 0.335  (n=994)
+2026-03-31 09:52:49,455 | INFO | Value correlation — Pearson R=0.1156  Spearman ρ=0.1854  (n=1000)
+2026-03-31 09:52:51,622 | INFO | Puzzle accuracy — 0.220  (11/50)
+2026-03-31 09:53:31,509 | INFO | TemperatureScaler fitted: T=1.6099 (converged=True)
+2026-03-31 09:53:31,519 | INFO | TemperatureScaler saved to output/gateau_seq_smoke.pt.calib.json (T=1.6099)
+2026-03-31 09:53:31,523 | INFO | Results appended to output/scaling_results.csv
+2026-03-31 09:53:31,524 | INFO | === gateau_seq_smoke done | top1=20.2% | puzzle=22.0% | R=0.116 | ECE 0.020→0.006 ===
+2026-03-31 09:53:31,525 | INFO | All experiments complete. Results → output/scaling_results.csv
+2026-03-31 09:57:48,814 | INFO | === Experiment: gateau_seq_smoke | device=cuda ===
+2026-03-31 09:57:48,844 | INFO | [gateau_seq_smoke] Val set: 50 positions from output/distillation_labels_val1k.jsonl
+2026-03-31 09:57:49,189 | INFO | [gateau_seq_smoke] GATEAUChessModel: hidden=64  layers=2  params=207,798
+2026-03-31 09:57:49,347 | INFO | GameSequenceDataset: 2 workers, 30 games (depth=4)
+2026-03-31 10:05:27,758 | INFO | === Experiment: gateau_seq_smoke | device=cuda ===
+2026-03-31 10:05:27,793 | INFO | [gateau_seq_smoke] Val set: 50 positions from output/distillation_labels_val1k.jsonl
+2026-03-31 10:05:28,313 | INFO | [gateau_seq_smoke] GATEAUChessModel: hidden=64  layers=2  params=207,798
+2026-03-31 10:05:28,314 | INFO | [gateau_seq_smoke] Distillation phase: labelling 30 games → output/gateau_seq_smoke_game_labels.jsonl
+2026-03-31 10:05:28,519 | INFO | Generating labels for 30 games with 2 workers (depth=4)
+2026-03-31 10:05:34,948 | INFO | Saved 30 labelled games to output/gateau_seq_smoke_game_labels.jsonl
+2026-03-31 10:05:34,977 | INFO | [gateau_seq_smoke] Training phase: 30 games, 2 DataLoader workers
+2026-03-31 10:07:53,799 | INFO | === Experiment: gateau_seq_smoke | device=cuda ===
+2026-03-31 10:07:53,832 | INFO | [gateau_seq_smoke] Val set: 50 positions from output/distillation_labels_val1k.jsonl
+2026-03-31 10:07:54,238 | INFO | [gateau_seq_smoke] GATEAUChessModel: hidden=64  layers=2  params=207,798
+2026-03-31 10:07:54,240 | INFO | [gateau_seq_smoke] Reusing existing game labels: output/gateau_seq_smoke_game_labels.jsonl
+2026-03-31 10:07:54,256 | INFO | [gateau_seq_smoke] Training phase: 30 games, 2 DataLoader workers
+2026-03-31 10:08:55,589 | INFO | === Experiment: gateau_seq_smoke | device=cuda ===
+2026-03-31 10:08:55,613 | INFO | [gateau_seq_smoke] Val set: 50 positions from output/distillation_labels_val1k.jsonl
+2026-03-31 10:08:55,916 | INFO | [gateau_seq_smoke] GATEAUChessModel: hidden=64  layers=2  params=207,798
+2026-03-31 10:08:55,918 | INFO | [gateau_seq_smoke] Reusing existing game labels: output/gateau_seq_smoke_game_labels.jsonl
+2026-03-31 10:08:55,934 | INFO | [gateau_seq_smoke] Training phase: 30 games, 2 DataLoader workers
+2026-03-31 10:17:37,807 | INFO | === Experiment: gateau_seq_smoke | device=cuda ===
+2026-03-31 10:17:37,848 | INFO | [gateau_seq_smoke] Val set: 50 positions from output/distillation_labels_val1k.jsonl
+2026-03-31 10:17:38,255 | INFO | [gateau_seq_smoke] GATEAUChessModel: hidden=64  layers=2  params=207,798
+2026-03-31 10:17:38,257 | INFO | [gateau_seq_smoke] Reusing existing game labels: output/gateau_seq_smoke_game_labels.jsonl
+2026-03-31 10:17:38,277 | INFO | [gateau_seq_smoke] Training phase: 30 games, 2 DataLoader workers
+2026-03-31 10:21:23,731 | INFO | [gateau_seq_smoke] Epoch 1/1  loss=3.8106 (v_sf=0.1737 v_out=0.9487 q=3.1626)  val_top1=22.4%  val_top3=49.0%
+2026-03-31 10:21:23,817 | INFO | [gateau_seq_smoke]   → new best top-1 22.4%
+2026-03-31 10:21:24,527 | INFO | Training plot saved to output/gateau_seq_smoke_training.png
+2026-03-31 10:21:24,528 | INFO | [gateau_seq_smoke] Sequential training done in 225s.  Best val top-1: 22.4%
+2026-03-31 10:22:46,810 | INFO | Engine agreement — top1: 0.218  top3: 0.344  (n=994)
+2026-03-31 10:23:51,274 | INFO | Value correlation — Pearson R=0.1258  Spearman ρ=0.0960  (n=1000)
+2026-03-31 10:23:55,339 | INFO | Puzzle accuracy — 0.240  (12/50)
+2026-03-31 10:27:40,499 | INFO | === Experiment: gateau_seq_smoke | device=cuda ===
+2026-03-31 10:27:40,525 | INFO | [gateau_seq_smoke] Val set: 50 positions from output/distillation_labels_val1k.jsonl
+2026-03-31 10:27:40,927 | INFO | [gateau_seq_smoke] GATEAUChessModel: hidden=64  layers=2  params=207,798
+2026-03-31 10:27:40,929 | INFO | [gateau_seq_smoke] Reusing existing game labels: output/gateau_seq_smoke_game_labels.jsonl
+2026-03-31 10:27:40,942 | INFO | [gateau_seq_smoke] Training phase: 30 games, 4 DataLoader workers
+2026-03-31 10:28:26,867 | INFO | [gateau_seq_smoke] Epoch 1/1  loss=3.8334 (v_sf=0.1693 v_out=0.9563 q=3.1860)  val_top1=24.5%  val_top3=46.9%
+2026-03-31 10:28:26,911 | INFO | [gateau_seq_smoke]   → new best top-1 24.5%
+2026-03-31 10:28:27,281 | INFO | Training plot saved to output/gateau_seq_smoke_training.png
+2026-03-31 10:28:27,281 | INFO | [gateau_seq_smoke] Sequential training done in 46s.  Best val top-1: 24.5%
+2026-03-31 10:29:07,150 | INFO | Engine agreement — top1: 0.191  top3: 0.311  (n=994)
+2026-03-31 10:29:46,624 | INFO | Value correlation — Pearson R=0.1143  Spearman ρ=0.1172  (n=1000)
+2026-03-31 10:29:48,728 | INFO | Puzzle accuracy — 0.140  (7/50)
+2026-03-31 10:30:28,032 | INFO | TemperatureScaler fitted: T=4.7056 (converged=True)
+2026-03-31 10:30:28,056 | INFO | TemperatureScaler saved to output/gateau_seq_smoke.pt.calib.json (T=4.7056)
+2026-03-31 10:30:28,061 | INFO | Results appended to output/scaling_results.csv
+2026-03-31 10:30:28,061 | INFO | === gateau_seq_smoke done | top1=19.1% | puzzle=14.0% | R=0.114 | ECE 0.066→0.002 ===
+2026-03-31 10:30:28,064 | INFO | All experiments complete. Results → output/scaling_results.csv
+2026-03-31 10:31:29,001 | INFO | === Experiment: gateau_seq_smoke | device=cuda ===
+2026-03-31 10:31:29,028 | INFO | [gateau_seq_smoke] Val set: 50 positions from output/distillation_labels_val1k.jsonl
+2026-03-31 10:31:29,364 | INFO | [gateau_seq_smoke] GATEAUChessModel: hidden=64  layers=2  params=207,798
+2026-03-31 10:31:29,366 | INFO | [gateau_seq_smoke] Reusing existing game labels: output/gateau_seq_smoke_game_labels.jsonl
+2026-03-31 10:31:29,378 | INFO | [gateau_seq_smoke] Training phase: 30 games, 4 DataLoader workers
+2026-03-31 10:32:15,208 | INFO | [gateau_seq_smoke] Epoch 1/1  loss=3.8019 (v_sf=0.1664 v_out=0.9190 q=3.1760)  val_top1=16.3%  val_top3=44.9%
+2026-03-31 10:32:15,260 | INFO | [gateau_seq_smoke]   → new best top-1 16.3%
+2026-03-31 10:32:15,684 | INFO | Training plot saved to output/gateau_seq_smoke_training.png
+2026-03-31 10:32:15,685 | INFO | [gateau_seq_smoke] Sequential training done in 46s.  Best val top-1: 16.3%
+2026-03-31 10:32:57,634 | INFO | Engine agreement — top1: 0.202  top3: 0.339  (n=994)
+2026-03-31 10:33:37,074 | INFO | Value correlation — Pearson R=0.1391  Spearman ρ=0.1597  (n=1000)
+2026-03-31 10:33:39,493 | INFO | Puzzle accuracy — 0.220  (11/50)
+2026-03-31 10:34:19,798 | INFO | TemperatureScaler fitted: T=3.7484 (converged=True)
+2026-03-31 10:34:19,836 | INFO | TemperatureScaler saved to output/gateau_seq_smoke.pt.calib.json (T=3.7484)
+2026-03-31 10:34:19,862 | INFO | Results appended to output/scaling_results.csv
+2026-03-31 10:34:19,863 | INFO | === gateau_seq_smoke done | top1=20.2% | puzzle=22.0% | R=0.139 | ECE 0.055→0.003 ===
+2026-03-31 10:34:19,865 | INFO | All experiments complete. Results → output/scaling_results.csv
+2026-03-31 10:36:18,834 | INFO | === Experiment: gateau_seq_smoke | device=cuda ===
+2026-03-31 10:36:18,855 | INFO | [gateau_seq_smoke] Val set: 50 positions from output/distillation_labels_val1k.jsonl
+2026-03-31 10:36:21,318 | INFO | [gateau_seq_smoke] GATEAUChessModel: hidden=64  layers=256  params=18,189,474
+2026-03-31 10:36:21,320 | INFO | [gateau_seq_smoke] Reusing existing game labels: output/gateau_seq_smoke_game_labels.jsonl
+2026-03-31 10:36:21,335 | INFO | [gateau_seq_smoke] Training phase: 30 games, 4 DataLoader workers
+2026-03-31 10:37:03,235 | INFO | === Experiment: gateau_seq_smoke | device=cuda ===
+2026-03-31 10:37:03,266 | INFO | [gateau_seq_smoke] Val set: 50 positions from output/distillation_labels_val1k.jsonl
+2026-03-31 10:37:05,890 | INFO | [gateau_seq_smoke] GATEAUChessModel: hidden=64  layers=256  params=18,189,474
+2026-03-31 10:37:05,892 | INFO | [gateau_seq_smoke] Reusing existing game labels: output/gateau_seq_smoke_game_labels.jsonl
+2026-03-31 10:37:05,914 | INFO | [gateau_seq_smoke] Training phase: 30 games, 4 DataLoader workers
+2026-03-31 11:06:37,659 | INFO | === Experiment: gateau_seq_smoke | device=cuda ===
+2026-03-31 11:06:37,703 | INFO | [gateau_seq_smoke] Val set: 50 positions from output/distillation_labels_val1k.jsonl
+2026-03-31 11:06:38,510 | INFO | [gateau_seq_smoke] GATEAUChessModel: hidden=64  layers=64  params=4,597,026
+2026-03-31 11:06:38,512 | INFO | [gateau_seq_smoke] Reusing existing game labels: output/gateau_seq_smoke_game_labels.jsonl
+2026-03-31 11:06:38,537 | INFO | [gateau_seq_smoke] Training phase: 30 games, 4 DataLoader workers
+2026-03-31 11:12:01,905 | INFO | [gateau_seq_smoke] Epoch 1/3  loss=3.8427 (v_sf=0.1830 v_out=0.8850 q=3.2172)  val_top1=24.5%  val_top3=42.9%
+2026-03-31 11:12:03,704 | INFO | [gateau_seq_smoke]   → new best top-1 24.5%
+2026-03-31 11:19:11,667 | INFO | [gateau_seq_smoke] Epoch 2/3  loss=3.7240 (v_sf=0.1743 v_out=0.9491 q=3.0751)  val_top1=26.5%  val_top3=46.9%
+2026-03-31 11:19:13,537 | INFO | [gateau_seq_smoke]   → new best top-1 26.5%
+2026-03-31 11:25:47,005 | INFO | [gateau_seq_smoke] Epoch 3/3  loss=3.6797 (v_sf=0.1899 v_out=0.8714 q=3.0540)  val_top1=28.6%  val_top3=46.9%
+2026-03-31 11:25:48,489 | INFO | [gateau_seq_smoke]   → new best top-1 28.6%
+2026-03-31 11:25:48,951 | INFO | Training plot saved to output/gateau_seq_smoke_training.png
+2026-03-31 11:25:48,952 | INFO | [gateau_seq_smoke] Sequential training done in 1148s.  Best val top-1: 28.6%
+2026-03-31 11:38:32,547 | INFO | === Experiment: gateau_sequential_h128_l4 | device=cuda ===
+2026-03-31 11:38:32,569 | INFO | [gateau_sequential_h128_l4] Val set: 150 positions from output/distillation_labels_val1k.jsonl
+2026-03-31 11:38:32,923 | INFO | [gateau_sequential_h128_l4] GATEAUChessModel: hidden=128  layers=4  params=1,378,634
+2026-03-31 11:38:32,924 | INFO | [gateau_sequential_h128_l4] Distillation phase: labelling 5000 games → output/game_labels_5k_d8.jsonl
+2026-03-31 11:38:58,058 | INFO | Generating labels for 5000 games with 8 workers (depth=8)
+2026-03-31 12:37:17,146 | INFO | Saved 5000 labelled games to output/game_labels_5k_d8.jsonl
+2026-03-31 12:37:20,042 | INFO | [gateau_sequential_h128_l4] Training phase: 5000 games, 4 DataLoader workers
+2026-03-31 14:44:44,453 | INFO | [gateau_sequential_h128_l4] Epoch 1/3  loss=3.0909 (v_sf=0.1418 v_out=0.9187 q=2.4898)  val_top1=31.5%  val_top3=49.7%
+2026-03-31 14:44:44,599 | INFO | [gateau_sequential_h128_l4]   → new best top-1 31.5%
+2026-03-31 16:39:53,533 | INFO | [gateau_sequential_h128_l4] Epoch 2/3  loss=2.8033 (v_sf=0.0850 v_out=0.8090 q=2.3137)  val_top1=30.9%  val_top3=53.7%
+2026-03-31 18:30:56,992 | INFO | [gateau_sequential_h128_l4] Epoch 3/3  loss=2.6946 (v_sf=0.0682 v_out=0.7776 q=2.2375)  val_top1=34.9%  val_top3=53.0%
+2026-03-31 18:30:57,115 | INFO | [gateau_sequential_h128_l4]   → new best top-1 34.9%
+2026-03-31 18:30:57,477 | INFO | Training plot saved to output/gateau_sequential_h128_l4_training.png
+2026-03-31 18:30:57,478 | INFO | [gateau_sequential_h128_l4] Sequential training done in 21217s.  Best val top-1: 34.9%
+2026-03-31 18:32:05,532 | INFO | Engine agreement — top1: 0.340  top5: 0.654  (n=994)
+2026-03-31 18:33:12,255 | INFO | Value correlation — Pearson R=0.8040  Spearman ρ=0.7942  (n=1000)
+2026-03-31 18:33:44,773 | INFO | Puzzle accuracy — 0.312  (156/500)
+2026-03-31 18:34:47,520 | INFO | TemperatureScaler fitted: T=1.0899 (converged=True)
+2026-03-31 18:34:47,558 | INFO | TemperatureScaler saved to output/gateau_sequential_h128_l4.pt.calib.json (T=1.0899)
+2026-03-31 18:34:47,573 | INFO | Results appended to output/scaling_results.csv
+2026-03-31 18:34:47,574 | INFO | === gateau_sequential_h128_l4 done | top1=34.0% | puzzle=31.2% | R=0.804 | ECE 0.017→0.021 ===
+2026-03-31 18:34:47,583 | INFO | All experiments complete. Results → output/scaling_results.csv
+2026-03-31 20:59:37,184 | INFO | === Experiment: gateau_structural_h64_l2_smoke | device=cuda ===
+2026-03-31 20:59:37,211 | INFO | [gateau_structural_h64_l2_smoke] Val set: 150 positions from output/distillation_labels_val1k.jsonl
+2026-03-31 20:59:37,589 | INFO | [gateau_structural_h64_l2_smoke] GATEAUChessModel: hidden=64  layers=2  params=208,118
+2026-03-31 20:59:37,590 | INFO | [gateau_structural_h64_l2_smoke] Distillation phase: labelling 200 games → output/game_labels_structural_smoke.jsonl
+2026-03-31 20:59:38,475 | INFO | Generating labels for 200 games with 4 workers (depth=6)
+2026-03-31 21:00:17,876 | INFO | Saved 200 labelled games to output/game_labels_structural_smoke.jsonl
+2026-03-31 21:00:18,016 | INFO | [gateau_structural_h64_l2_smoke] Training phase: 200 games, 2 DataLoader workers
+2026-03-31 21:05:04,217 | INFO | [gateau_structural_h64_l2_smoke] Epoch 1/1  loss=3.6990 (v_sf=0.2297 v_out=0.9403 q=2.9991)  val_top1=18.8%  val_top3=38.3%
+2026-03-31 21:05:04,283 | INFO | [gateau_structural_h64_l2_smoke]   → new best top-1 18.8%
+2026-03-31 21:05:04,730 | INFO | Training plot saved to output/gateau_structural_h64_l2_smoke_training.png
+2026-03-31 21:05:04,730 | INFO | [gateau_structural_h64_l2_smoke] Sequential training done in 286s.  Best val top-1: 18.8%
+2026-03-31 21:05:43,627 | INFO | Engine agreement — top1: 0.227  top5: 0.441  (n=994)
+2026-03-31 21:06:22,022 | INFO | Value correlation — Pearson R=0.1294  Spearman ρ=0.1488  (n=1000)
+2026-03-31 21:06:25,848 | INFO | Puzzle accuracy — 0.260  (26/100)
+2026-03-31 21:07:15,749 | INFO | TemperatureScaler fitted: T=20.0855 (converged=True)
+2026-03-31 21:07:15,778 | INFO | TemperatureScaler saved to output/gateau_structural_h64_l2_smoke.pt.calib.json (T=20.0855)
+2026-03-31 21:07:15,794 | INFO | Results appended to output/scaling_results.csv
+2026-03-31 21:07:15,795 | INFO | === gateau_structural_h64_l2_smoke done | top1=22.7% | puzzle=26.0% | R=0.129 | ECE 0.032→0.017 ===
+2026-03-31 21:07:15,796 | INFO | All experiments complete. Results → output/scaling_results.csv
+2026-03-31 21:08:33,566 | INFO | === Experiment: gateau_structural_h192_l5_10k | device=cuda ===
+2026-03-31 21:08:33,596 | INFO | [gateau_structural_h192_l5_10k] Val set: 150 positions from output/distillation_labels_val1k.jsonl
+2026-03-31 21:08:34,084 | INFO | [gateau_structural_h192_l5_10k] GATEAUChessModel: hidden=192  layers=5  params=3,718,932
+2026-03-31 21:08:34,085 | INFO | [gateau_structural_h192_l5_10k] Distillation phase: labelling 10000 games → output/game_labels_10k_d8.jsonl
+2026-03-31 21:09:30,830 | INFO | Generating labels for 10000 games with 8 workers (depth=5)
+2026-03-31 21:28:10,275 | INFO | Saved 10000 labelled games to output/game_labels_10k_d8.jsonl
+2026-03-31 21:28:15,003 | INFO | [gateau_structural_h192_l5_10k] Training phase: 10000 games, 4 DataLoader workers
+2026-04-01 01:28:37,860 | INFO | [gateau_structural_h192_l5_10k] Epoch 1/5  loss=3.0600 (v_sf=0.1088 v_out=0.8840 q=2.5092)  val_top1=31.5%  val_top3=54.4%
+2026-04-01 01:28:38,148 | INFO | [gateau_structural_h192_l5_10k]   → new best top-1 31.5%
+2026-04-01 05:28:46,957 | INFO | [gateau_structural_h192_l5_10k] Epoch 2/5  loss=2.7543 (v_sf=0.0596 v_out=0.7715 q=2.3090)  val_top1=34.2%  val_top3=57.7%
+2026-04-01 05:28:47,211 | INFO | [gateau_structural_h192_l5_10k]   → new best top-1 34.2%
+2026-04-01 09:30:30,484 | INFO | [gateau_structural_h192_l5_10k] Epoch 3/5  loss=2.6386 (v_sf=0.0495 v_out=0.7464 q=2.2159)  val_top1=32.9%  val_top3=58.4%
+2026-04-01 13:33:07,384 | INFO | [gateau_structural_h192_l5_10k] Epoch 4/5  loss=2.5612 (v_sf=0.0452 v_out=0.7336 q=2.1492)  val_top1=34.9%  val_top3=57.0%
+2026-04-01 13:33:07,672 | INFO | [gateau_structural_h192_l5_10k]   → new best top-1 34.9%
+2026-04-01 17:36:23,342 | INFO | [gateau_structural_h192_l5_10k] Epoch 5/5  loss=2.4999 (v_sf=0.0424 v_out=0.7271 q=2.0939)  val_top1=32.9%  val_top3=57.0%
+2026-04-01 17:36:23,702 | INFO | Training plot saved to output/gateau_structural_h192_l5_10k_training.png
+2026-04-01 17:36:23,703 | INFO | [gateau_structural_h192_l5_10k] Sequential training done in 57892s.  Best val top-1: 34.9%
+2026-04-01 17:37:39,199 | INFO | Engine agreement — top1: 0.357  top5: 0.704  (n=994)
+2026-04-01 17:38:55,103 | INFO | Value correlation — Pearson R=0.7444  Spearman ρ=0.7081  (n=1000)
+2026-04-01 17:39:34,070 | INFO | Puzzle accuracy — 0.360  (180/500)
+2026-04-01 17:40:50,565 | INFO | TemperatureScaler fitted: T=1.2386 (converged=True)
+2026-04-01 17:40:50,589 | INFO | TemperatureScaler saved to output/gateau_structural_h192_l5_10k.pt.calib.json (T=1.2386)
+2026-04-01 17:40:50,592 | INFO | Results appended to output/scaling_results.csv
+2026-04-01 17:40:50,593 | INFO | === gateau_structural_h192_l5_10k done | top1=35.7% | puzzle=36.0% | R=0.744 | ECE 0.039→0.029 ===
+2026-04-01 17:40:50,594 | INFO | All experiments complete. Results → output/scaling_results.csv
+2026-04-06 21:46:28,850 | INFO | === Experiment: gateau_large_h256_l6_elo1600_smoke | device=cuda ===
+2026-04-06 21:46:28,857 | INFO | [gateau_large_h256_l6_elo1600_smoke] Val set: 19 positions from output/distillation_labels_val128_smoke.jsonl
+2026-04-06 21:46:29,271 | INFO | [gateau_large_h256_l6_elo1600_smoke] GATEAUChessModel: hidden=256  layers=6  params=7,715,678
+2026-04-06 21:46:29,272 | INFO | [gateau_large_h256_l6_elo1600_smoke] Reusing existing game labels: output/game_labels_elo1600_smoke64.jsonl
+2026-04-06 21:46:29,325 | INFO | [gateau_large_h256_l6_elo1600_smoke] Training phase: 64 labelled games, 2 DataLoader workers, ELO range [1600, 9999]
+2026-04-06 21:48:30,137 | INFO | [gateau_large_h256_l6_elo1600_smoke] Epoch 1/1  loss=3.8419 (v_sf=0.2433 v_out=0.9627 q=3.1173)  val_top1=16.7%  val_top3=44.4%
+2026-04-06 21:48:30,522 | INFO | [gateau_large_h256_l6_elo1600_smoke]   → new best top-1 16.7%
+2026-04-06 21:48:30,871 | INFO | Training plot saved to output/gateau_large_h256_l6_elo1600_smoke_training.png
+2026-04-06 21:48:30,872 | INFO | [gateau_large_h256_l6_elo1600_smoke] Sequential training done in 121s.  Best val top-1: 16.7%
+2026-04-06 21:48:43,287 | INFO | Engine agreement — top1: 0.165  top5: 0.457  (n=127)
+2026-04-06 21:48:55,029 | INFO | Value correlation — Pearson R=-0.2264  Spearman ρ=-0.2817  (n=128)
+2026-04-06 21:48:57,644 | INFO | Puzzle accuracy — 0.200  (5/25)
+2026-04-06 21:49:09,953 | INFO | TemperatureScaler fitted: T=20.0855 (converged=True)
+2026-04-06 21:49:09,958 | INFO | TemperatureScaler saved to output/gateau_large_h256_l6_elo1600_smoke.pt.calib.json (T=20.0855)
+2026-04-06 21:49:09,961 | INFO | Results appended to output/scaling_results.csv
+2026-04-06 21:49:09,972 | INFO | === gateau_large_h256_l6_elo1600_smoke done | top1=16.5% | puzzle=20.0% | R=-0.226 | ECE 0.032→0.007 ===
+2026-04-06 21:49:09,975 | INFO | All experiments complete. Results → output/scaling_results.csv
+2026-04-06 21:56:22,084 | INFO | === Experiment: gateau_medium_h128_l4_elo1600_e2 | device=cuda ===
+2026-04-06 21:56:22,107 | INFO | [gateau_medium_h128_l4_elo1600_e2] Val set: 1000 positions from output/distillation_labels_val1k.jsonl
+2026-04-06 21:56:22,373 | INFO | [gateau_medium_h128_l4_elo1600_e2] GATEAUChessModel: hidden=128  layers=4  params=1,379,274
+2026-04-06 21:56:22,374 | INFO | [gateau_medium_h128_l4_elo1600_e2] Reusing existing game labels: output/game_labels_10k_d8.jsonl
+2026-04-06 21:56:31,048 | INFO | [gateau_medium_h128_l4_elo1600_e2] Training phase: 4709 labelled games, 4 DataLoader workers, ELO range [1600, 9999]
+2026-04-06 23:46:10,352 | INFO | [gateau_medium_h128_l4_elo1600_e2] Epoch 1/2  loss=3.2388 (v_sf=0.1364 v_out=0.9432 q=2.6308)  val_top1=31.6%  val_top3=52.0%
+2026-04-06 23:46:10,482 | INFO | [gateau_medium_h128_l4_elo1600_e2]   → new best top-1 31.6%
+2026-04-07 01:37:59,853 | INFO | [gateau_medium_h128_l4_elo1600_e2] Epoch 2/2  loss=2.9689 (v_sf=0.0846 v_out=0.8599 q=2.4543)  val_top1=32.8%  val_top3=52.8%
+2026-04-07 01:38:00,010 | INFO | [gateau_medium_h128_l4_elo1600_e2]   → new best top-1 32.8%
+2026-04-07 01:38:00,358 | INFO | Training plot saved to output/gateau_medium_h128_l4_elo1600_e2_training.png
+2026-04-07 01:38:00,358 | INFO | [gateau_medium_h128_l4_elo1600_e2] Sequential training done in 13289s.  Best val top-1: 32.8%
+2026-04-07 01:38:57,978 | INFO | Engine agreement — top1: 0.327  top5: 0.674  (n=994)
+2026-04-07 01:39:54,781 | INFO | Value correlation — Pearson R=0.7801  Spearman ρ=0.7586  (n=1000)
+2026-04-07 01:40:09,435 | INFO | Puzzle accuracy — 0.320  (80/250)
+2026-04-07 01:41:05,499 | INFO | TemperatureScaler fitted: T=0.8279 (converged=True)
+2026-04-07 01:41:05,520 | INFO | TemperatureScaler saved to output/gateau_medium_h128_l4_elo1600_e2.pt.calib.json (T=0.8279)
+2026-04-07 01:41:05,524 | INFO | Results appended to output/scaling_results.csv
+2026-04-07 01:41:05,524 | INFO | === gateau_medium_h128_l4_elo1600_e2 done | top1=32.7% | puzzle=32.0% | R=0.780 | ECE 0.032→0.033 ===
+2026-04-07 01:41:05,526 | INFO | === Experiment: gateau_medium_h192_l5_elo1600_e2 | device=cuda ===
+2026-04-07 01:41:05,580 | INFO | [gateau_medium_h192_l5_elo1600_e2] Val set: 1000 positions from output/distillation_labels_val1k.jsonl
+2026-04-07 01:41:05,739 | INFO | [gateau_medium_h192_l5_elo1600_e2] GATEAUChessModel: hidden=192  layers=5  params=3,718,932
+2026-04-07 01:41:05,741 | INFO | [gateau_medium_h192_l5_elo1600_e2] Reusing existing game labels: output/game_labels_10k_d8.jsonl
+2026-04-07 01:41:14,706 | INFO | [gateau_medium_h192_l5_elo1600_e2] Training phase: 4709 labelled games, 4 DataLoader workers, ELO range [1600, 9999]
+2026-04-07 03:48:29,946 | INFO | [gateau_medium_h192_l5_elo1600_e2] Epoch 1/2  loss=3.2332 (v_sf=0.1325 v_out=0.9391 q=2.6311)  val_top1=30.7%  val_top3=52.7%
+2026-04-07 03:48:30,127 | INFO | [gateau_medium_h192_l5_elo1600_e2]   → new best top-1 30.7%
+2026-04-07 06:17:41,746 | INFO | [gateau_medium_h192_l5_elo1600_e2] Epoch 2/2  loss=2.9723 (v_sf=0.0888 v_out=0.8790 q=2.4440)  val_top1=33.6%  val_top3=53.7%
+2026-04-07 06:17:42,078 | INFO | [gateau_medium_h192_l5_elo1600_e2]   → new best top-1 33.6%
+2026-04-07 06:17:42,522 | INFO | Training plot saved to output/gateau_medium_h192_l5_elo1600_e2_training.png
+2026-04-07 06:17:42,524 | INFO | [gateau_medium_h192_l5_elo1600_e2] Sequential training done in 16587s.  Best val top-1: 33.6%
+2026-04-07 06:20:09,454 | INFO | Engine agreement — top1: 0.335  top5: 0.662  (n=994)
+2026-04-07 06:22:41,637 | INFO | Value correlation — Pearson R=0.7934  Spearman ρ=0.7730  (n=1000)
+2026-04-07 06:23:27,470 | INFO | Puzzle accuracy — 0.316  (79/250)
+2026-04-07 06:25:43,092 | INFO | TemperatureScaler fitted: T=0.7074 (converged=True)
+2026-04-07 06:25:43,118 | INFO | TemperatureScaler saved to output/gateau_medium_h192_l5_elo1600_e2.pt.calib.json (T=0.7074)
+2026-04-07 06:25:43,137 | INFO | Results appended to output/scaling_results.csv
+2026-04-07 06:25:43,139 | INFO | === gateau_medium_h192_l5_elo1600_e2 done | top1=33.5% | puzzle=31.6% | R=0.793 | ECE 0.043→0.032 ===
+2026-04-07 06:25:43,144 | INFO | All experiments complete. Results → output/scaling_results.csv
+2026-04-07 06:58:14,056 | INFO | === Experiment: gateau_medium_h192_l5_elo1600_hybrid_smoke | device=cuda ===
+2026-04-07 06:58:14,062 | INFO | [gateau_medium_h192_l5_elo1600_hybrid_smoke] Val set: 128 positions from output/distillation_labels_val128_smoke.jsonl
+2026-04-07 06:58:14,476 | INFO | [gateau_medium_h192_l5_elo1600_hybrid_smoke] GATEAUChessModel: hidden=192  layers=5  params=3,718,932
+2026-04-07 06:58:14,477 | INFO | [gateau_medium_h192_l5_elo1600_hybrid_smoke] Reusing existing game labels: output/game_labels_elo1600_smoke64.jsonl
+2026-04-07 06:58:14,535 | INFO | [gateau_medium_h192_l5_elo1600_hybrid_smoke] Training phase: 64 labelled games, 2 DataLoader workers, ELO range [1600, 9999]
+2026-04-07 07:00:13,426 | INFO | [gateau_medium_h192_l5_elo1600_hybrid_smoke] Epoch 1/1  loss=4.9210 (v_sf=0.2311 v_out=0.9580 q=3.1030 q_human=3.1653)  val_top1=16.5%  val_top3=35.4%
+2026-04-07 07:00:13,664 | INFO | [gateau_medium_h192_l5_elo1600_hybrid_smoke]   → new best top-1 16.5%
+2026-04-07 07:00:14,026 | INFO | Training plot saved to output/gateau_medium_h192_l5_elo1600_hybrid_smoke_training.png
+2026-04-07 07:00:14,027 | INFO | [gateau_medium_h192_l5_elo1600_hybrid_smoke] Sequential training done in 119s.  Best val top-1: 16.5%
+2026-04-07 07:00:25,247 | INFO | Engine agreement — top1: 0.165  top5: 0.441  (n=127)
+2026-04-07 07:00:36,148 | INFO | Value correlation — Pearson R=-0.2032  Spearman ρ=-0.2246  (n=128)
+2026-04-07 07:05:55,297 | INFO | Human move prediction — top1: 0.197  top5: 0.444  (n=3727)
+2026-04-07 07:05:57,562 | INFO | Puzzle accuracy — 0.160  (4/25)
+2026-04-07 07:06:07,816 | INFO | TemperatureScaler fitted: T=20.0855 (converged=True)
+2026-04-07 07:06:07,825 | INFO | TemperatureScaler saved to output/gateau_medium_h192_l5_elo1600_hybrid_smoke.pt.calib.json (T=20.0855)
+2026-04-07 07:06:07,829 | INFO | Results appended to output/scaling_results.csv
+2026-04-07 07:06:07,830 | INFO | === gateau_medium_h192_l5_elo1600_hybrid_smoke done | top1=16.5% | puzzle=16.0% | R=-0.203 | ECE 0.026→0.007 ===
+2026-04-07 07:06:07,831 | INFO | All experiments complete. Results → output/scaling_results.csv
+2026-04-07 07:30:47,365 | INFO | === Experiment: gateau_medium_h192_l5_elo1600_hybrid_probe1024_e1 | device=cuda ===
+2026-04-07 07:30:47,375 | INFO | [gateau_medium_h192_l5_elo1600_hybrid_probe1024_e1] Val set: 256 positions from output/distillation_labels_val256_probe.jsonl
+2026-04-07 07:30:47,864 | INFO | [gateau_medium_h192_l5_elo1600_hybrid_probe1024_e1] GATEAUChessModel: hidden=192  layers=5  params=3,718,932
+2026-04-07 07:30:47,866 | INFO | [gateau_medium_h192_l5_elo1600_hybrid_probe1024_e1] Reusing existing game labels: output/game_labels_elo1600_probe1024.jsonl
+2026-04-07 07:30:49,171 | INFO | [gateau_medium_h192_l5_elo1600_hybrid_probe1024_e1] Training phase: 1024 labelled games, 4 DataLoader workers, ELO range [1600, 9999]
+2026-04-07 08:07:06,230 | INFO | [gateau_medium_h192_l5_elo1600_hybrid_probe1024_e1] Epoch 1/1  loss=3.9325 (v_sf=0.1820 v_out=0.9742 q=2.8419 q_human=2.8092)  val_top1=26.3%  val_top3=46.3%
+2026-04-07 08:07:06,437 | INFO | [gateau_medium_h192_l5_elo1600_hybrid_probe1024_e1]   → new best top-1 26.3%
+2026-04-07 08:07:06,819 | INFO | Training plot saved to output/gateau_medium_h192_l5_elo1600_hybrid_probe1024_e1_training.png
+2026-04-07 08:07:06,820 | INFO | [gateau_medium_h192_l5_elo1600_hybrid_probe1024_e1] Sequential training done in 2177s.  Best val top-1: 26.3%
+2026-04-07 08:07:28,783 | INFO | Engine agreement — top1: 0.267  top5: 0.541  (n=255)
+2026-04-07 08:07:49,017 | INFO | Value correlation — Pearson R=0.3772  Spearman ρ=0.3012  (n=256)
+2026-04-07 10:10:27,925 | INFO | === Experiment: gateau_medium_h192_l5_elo1600_hybrid_probe1024_e1 | device=cuda ===
+2026-04-07 10:10:27,946 | INFO | [gateau_medium_h192_l5_elo1600_hybrid_probe1024_e1] Val set: 256 positions from output/distillation_labels_val256_probe.jsonl
+2026-04-07 10:10:28,334 | INFO | [gateau_medium_h192_l5_elo1600_hybrid_probe1024_e1] GATEAUChessModel: hidden=192  layers=5  params=3,718,932
+2026-04-07 10:10:28,336 | INFO | [gateau_medium_h192_l5_elo1600_hybrid_probe1024_e1] Reusing existing game labels: output/game_labels_elo1600_probe1024.jsonl
+2026-04-07 10:10:29,499 | INFO | [gateau_medium_h192_l5_elo1600_hybrid_probe1024_e1] Training phase: 1024 labelled games, 4 DataLoader workers, ELO range [1600, 9999]
+2026-04-07 10:41:55,167 | INFO | [gateau_medium_h192_l5_elo1600_hybrid_probe1024_e1] Epoch 1/1  loss=3.8929 (v_sf=0.1701 v_out=0.9617 q=2.8240 q_human=2.7862)  val_top1=24.7%  val_top3=47.1%
+2026-04-07 10:41:55,368 | INFO | [gateau_medium_h192_l5_elo1600_hybrid_probe1024_e1]   → new best top-1 24.7%
+2026-04-07 10:41:55,685 | INFO | Training plot saved to output/gateau_medium_h192_l5_elo1600_hybrid_probe1024_e1_training.png
+2026-04-07 10:41:55,685 | INFO | [gateau_medium_h192_l5_elo1600_hybrid_probe1024_e1] Sequential training done in 1886s.  Best val top-1: 24.7%
+2026-04-07 10:42:15,235 | INFO | Engine agreement — top1: 0.251  top5: 0.569  (n=255)
+2026-04-07 10:42:34,127 | INFO | Value correlation — Pearson R=0.2032  Spearman ρ=0.1454  (n=256)
+2026-04-07 10:44:22,240 | INFO | Human move prediction — top1: 0.308  top5: 0.626  (n=1500)
+2026-04-07 10:44:29,672 | INFO | Puzzle accuracy — 0.290  (29/100)
+2026-04-07 10:44:47,864 | INFO | TemperatureScaler fitted: T=1.1998 (converged=True)
+2026-04-07 10:44:47,880 | INFO | TemperatureScaler saved to output/gateau_medium_h192_l5_elo1600_hybrid_probe1024_e1.pt.calib.json (T=1.1998)
+2026-04-07 10:44:47,913 | INFO | Results appended to output/scaling_results_hybrid.csv
+2026-04-07 10:44:47,914 | INFO | === gateau_medium_h192_l5_elo1600_hybrid_probe1024_e1 done | top1=25.1% | puzzle=29.0% | R=0.203 | ECE 0.056→0.043 ===
+2026-04-07 10:44:47,915 | INFO | All experiments complete. Results → output/scaling_results.csv

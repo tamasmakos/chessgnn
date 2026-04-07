@@ -1,7 +1,6 @@
 legacy
 stockfish
 .env
-output
 __pycache__
 agent
 input

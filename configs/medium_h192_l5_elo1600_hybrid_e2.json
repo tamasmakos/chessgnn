@@ -28,5 +28,6 @@
   "puzzle_csv": "input/lichess_db_puzzle.csv/lichess_db_puzzle.csv",
   "n_puzzles": 250,
   "eval_k": 5,
+  "human_eval_max_positions": 2000,
   "results_csv": "output/scaling_results.csv"
 }
