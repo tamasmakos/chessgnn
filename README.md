@@ -607,3 +607,5 @@ All flags are identical to `show_analytics.py`. Without `GROQ_API_KEY` the numer
 ## License
 
 See individual file headers. Stockfish is bundled under the GPL v3 (see `stockfish/Copying.txt`).
+
+smoke-test:vector-coder
