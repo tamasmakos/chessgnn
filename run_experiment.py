@@ -181,6 +181,22 @@ def _train_sequential(
     else:
         logger.info("[%s] Reusing existing game labels: %s", run_name, game_jsonl)
 
+    # Verify the file is actually readable before handing it to DataLoader workers.
+    # A missing shared file that passes os.path.exists() at startup but is deleted
+    # later (e.g. another process cleans up) would otherwise cause a silent crash
+    # 5+ hours into training.  Fail fast here instead.
+    if not os.path.isfile(game_jsonl):
+        raise FileNotFoundError(
+            f"[{run_name}] Game labels file not found after generation step: {game_jsonl}"
+        )
+    try:
+        with open(game_jsonl) as _ftest:
+            _ftest.readline()
+    except OSError as exc:
+        raise FileNotFoundError(
+            f"[{run_name}] Cannot read game labels file {game_jsonl}: {exc}"
+        ) from exc
+
     # ---- Training phase: load from JSONL (no Stockfish during training) ----
     train_ds = GameSequenceOfflineDataset(
         game_jsonl,

@@ -343,3 +343,8 @@
 2026-04-07 13:45:27,530 | INFO | [gateau_medium_h192_l5_dual_head_e2] Preloaded output/gateau_structural_h192_l5_10k.pt — missing keys (new heads): ['human_q_head.0.weight', 'human_q_head.0.bias', 'human_q_head.2.weight', 'human_q_head.2.bias']
 2026-04-07 13:45:27,531 | INFO | [gateau_medium_h192_l5_dual_head_e2] Reusing existing game labels: output/game_labels_10k_d8.jsonl
 2026-04-07 13:45:37,521 | INFO | [gateau_medium_h192_l5_dual_head_e2] Training phase: 10000 labelled games, 4 DataLoader workers, ELO range [0, 9999]
+2026-04-08 05:23:51,257 | INFO | === Experiment: gateau_medium_h192_l5_dual_head_e2 | device=cuda ===
+2026-04-08 05:23:51,285 | INFO | [gateau_medium_h192_l5_dual_head_e2] Val set: 1000 positions from output/distillation_labels_val1k.jsonl
+2026-04-08 05:23:51,679 | INFO | [gateau_medium_h192_l5_dual_head_e2] GATEAUChessModel: hidden=192  layers=5  params=3,797,077
+2026-04-08 05:23:51,919 | INFO | [gateau_medium_h192_l5_dual_head_e2] Preloaded weights from output/gateau_medium_h192_l5_dual_head_e2.pt
+2026-04-08 05:23:51,920 | INFO | [gateau_medium_h192_l5_dual_head_e2] Distillation phase: labelling 10000 games → output/game_labels_10k_d8_dual_head.jsonl
